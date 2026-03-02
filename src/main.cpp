@@ -418,8 +418,8 @@ int main(int argc, char* argv[]) {
     // ever called. This guarantees:
     //   - pipelineSDR is built from the real SDR swapchain format (e.g.
     //     B8G8R8A8_UNORM), not from whatever format HDR might switch it to.
-    //   - pipelineHDR is hardcoded to R16G16B16A16_FLOAT, which is the
-    //     format SDL3 defines for HDR_EXTENDED_LINEAR on both Vulkan and DX12.
+    //   - pipelineHDR is hardcoded to R10G10B10A2_UNORM, which is the
+    //     format SDL3 defines for HDR10 ST2084 on both Vulkan and DX12.
     // ------------------------------------------------------------------------
     SDL_GPUGraphicsPipeline* pipelineSDR = nullptr;
     SDL_GPUGraphicsPipeline* pipelineHDR = nullptr;
@@ -501,11 +501,11 @@ int main(int argc, char* argv[]) {
         }
 
         // --- HDR pipeline ---
-        // R16G16B16A16_FLOAT is the format SDL3 assigns to HDR_EXTENDED_LINEAR
+        // R10G10B10A2_UNORM is the format SDL3 assigns to HDR10 ST2084
         // on all backends. No runtime query needed here.
         {
             SDL_GPUColorTargetDescription colorTargetDesc = {};
-            colorTargetDesc.format      = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+            colorTargetDesc.format      = SDL_GPU_TEXTUREFORMAT_R10G10B10A2_UNORM;
             colorTargetDesc.blend_state = blendState;
             pipelineInfo.target_info.color_target_descriptions = &colorTargetDesc;
 
@@ -523,7 +523,7 @@ int main(int argc, char* argv[]) {
                 SDL_Quit();
                 return 1;
             }
-            SDL_Log("Created HDR pipeline with format: R16G16B16A16_FLOAT");
+            SDL_Log("Created HDR pipeline with format: R10G10B10A2_UNORM");
         }
     }
 
@@ -707,7 +707,7 @@ int main(int argc, char* argv[]) {
                     else if (event.key.key == SDLK_F1) {
                         vsyncEnabled = !vsyncEnabled;
                         SDL_GPUSwapchainComposition composition = hdrEnabled
-                            ? SDL_GPU_SWAPCHAINCOMPOSITION_HDR_EXTENDED_LINEAR
+                            ? SDL_GPU_SWAPCHAINCOMPOSITION_HDR10_ST2084
                             : SDL_GPU_SWAPCHAINCOMPOSITION_SDR;
                         SDL_GPUPresentMode presentMode = vsyncEnabled
                             ? SDL_GPU_PRESENTMODE_VSYNC
@@ -722,15 +722,15 @@ int main(int argc, char* argv[]) {
                             // This is what produces the "not supported" error on DX12
                             // when the display/OS doesn't have HDR active.
                             if (!SDL_WindowSupportsGPUSwapchainComposition(device, window,
-                                    SDL_GPU_SWAPCHAINCOMPOSITION_HDR_EXTENDED_LINEAR)) {
+                                SDL_GPU_SWAPCHAINCOMPOSITION_HDR10_ST2084)) {
                                 SDL_Log("HDR not supported. On Windows, enable HDR in Settings -> Display -> HDR.");
                             } else {
                                 bool success = setSwapchainParamsSafe(device, window,
-                                    SDL_GPU_SWAPCHAINCOMPOSITION_HDR_EXTENDED_LINEAR,
+                                    SDL_GPU_SWAPCHAINCOMPOSITION_HDR10_ST2084,
                                     vsyncEnabled ? SDL_GPU_PRESENTMODE_VSYNC : SDL_GPU_PRESENTMODE_IMMEDIATE);
                                 if (success) {
                                     hdrEnabled = true;
-                                    SDL_Log("HDR enabled (HDR Extended Linear)");
+                                    SDL_Log("HDR enabled (HDR10 ST2084)");
                                 } else {
                                     SDL_Log("Failed to enable HDR: %s", SDL_GetError());
                                 }
@@ -769,7 +769,7 @@ int main(int argc, char* argv[]) {
             float t = (std::sin(time * 0.5f) + 1.0f) * 0.5f;
             lerpColor(tintColor, COLOR_BLUE, COLOR_ORANGE, t);
 
-            float hdrScale = hdrEnabled ? 1.0f : 1.0f;
+            float hdrScale = hdrEnabled ? 2.0f : 1.0f;
 
             cpuVertexData[0] = Vertex{{-1.0f + offset, -1.0f + offset}, {0.0f, 0.0f}, {tintColor[0] * hdrScale, tintColor[1] * hdrScale, tintColor[2] * hdrScale, 1.0f}};
             cpuVertexData[1] = Vertex{{ 1.0f - offset, -1.0f + offset}, {1.0f, 0.0f}, {tintColor[0] * hdrScale, tintColor[1] * hdrScale, tintColor[2] * hdrScale, 1.0f}};
@@ -836,7 +836,7 @@ int main(int argc, char* argv[]) {
         SDL_GPUGraphicsPipeline* currentPipeline;
         {
             SDL_GPUTextureFormat currentFmt = SDL_GetGPUSwapchainTextureFormat(device, window);
-            currentPipeline = (currentFmt == SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT)
+            currentPipeline = (currentFmt == SDL_GPU_TEXTUREFORMAT_R10G10B10A2_UNORM)
                 ? pipelineHDR
                 : pipelineSDR;
         }
