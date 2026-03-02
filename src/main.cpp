@@ -81,7 +81,7 @@ AppSettings parseCommandLine(int argc, char* argv[]) {
             SDL_Log("Usage: %s [--vulkan|--d3d12] [--hdr]", argv[0]);
             SDL_Log("  --vulkan  : Use Vulkan backend with SPIR-V shaders");
             SDL_Log("  --d3d12   : Use D3D12 backend with DXIL shaders (Windows only)");
-            SDL_Log("  --hdr     : Start in HDR mode (toggle with F2)");
+            SDL_Log("  --hdr     : Start in HDR mode (cycle modes with F2)");
             SDL_Log("  (no args) : Auto-select backend");
         }
     }
@@ -482,6 +482,7 @@ int main(int argc, char* argv[]) {
     // ------------------------------------------------------------------------
     SDL_GPUGraphicsPipeline* pipelineSDR = nullptr;
     SDL_GPUGraphicsPipeline* pipelineHDR = nullptr;
+    SDL_GPUGraphicsPipeline* pipelineHDRExtended = nullptr;
 
     {
         SDL_GPUVertexAttribute vertexAttributes[3] = {};
@@ -583,6 +584,32 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             SDL_Log("Created HDR pipeline with format: R10G10B10A2_UNORM");
+        }
+
+        // --- HDR Extended Linear pipeline ---
+        // R16G16B16A16_FLOAT is the format for HDR Extended Linear (scRGB)
+        {
+            SDL_GPUColorTargetDescription colorTargetDesc = {};
+            colorTargetDesc.format      = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+            colorTargetDesc.blend_state = blendState;
+            pipelineInfo.target_info.color_target_descriptions = &colorTargetDesc;
+
+            pipelineHDRExtended = SDL_CreateGPUGraphicsPipeline(device, &pipelineInfo);
+            if (!pipelineHDRExtended) {
+                SDL_Log("Failed to create HDR Extended Linear pipeline: %s", SDL_GetError());
+                SDL_ReleaseGPUGraphicsPipeline(device, pipelineHDR);
+                SDL_ReleaseGPUGraphicsPipeline(device, pipelineSDR);
+                SDL_ReleaseGPUShader(device, fragmentShader);
+                SDL_ReleaseGPUShader(device, vertexShader);
+                SDL_ReleaseGPUSampler(device, sampler);
+                SDL_ReleaseGPUTexture(device, texture);
+                SDL_ReleaseWindowFromGPUDevice(device, window);
+                SDL_DestroyGPUDevice(device);
+                SDL_DestroyWindow(window);
+                SDL_Quit();
+                return 1;
+            }
+            SDL_Log("Created HDR Extended Linear pipeline with format: R16G16B16A16_FLOAT");
         }
     }
 
@@ -718,6 +745,7 @@ int main(int argc, char* argv[]) {
             SDL_ReleaseGPUBuffer(device, indexBuffer);
             SDL_ReleaseGPUGraphicsPipeline(device, pipelineSDR);
             SDL_ReleaseGPUGraphicsPipeline(device, pipelineHDR);
+            SDL_ReleaseGPUGraphicsPipeline(device, pipelineHDRExtended);
             SDL_ReleaseGPUSampler(device, sampler);
             SDL_ReleaseGPUTexture(device, texture);
             SDL_ReleaseWindowFromGPUDevice(device, window);
@@ -738,6 +766,7 @@ int main(int argc, char* argv[]) {
             SDL_ReleaseGPUBuffer(device, indexBuffer);
             SDL_ReleaseGPUGraphicsPipeline(device, pipelineSDR);
             SDL_ReleaseGPUGraphicsPipeline(device, pipelineHDR);
+            SDL_ReleaseGPUGraphicsPipeline(device, pipelineHDRExtended);
             SDL_ReleaseGPUSampler(device, sampler);
             SDL_ReleaseGPUTexture(device, texture);
             SDL_ReleaseWindowFromGPUDevice(device, window);
@@ -749,8 +778,16 @@ int main(int argc, char* argv[]) {
     }
 
     SDL_Log("SDL3 GPU MVP initialized successfully!");
-    SDL_Log("Controls: F1=Toggle VSync | F2=Toggle HDR | ESC=Quit");
-    SDL_Log("HDR mode: %s", hdrEnabled ? "ENABLED" : "disabled");
+    SDL_Log("Controls: F1=Toggle VSync | F2=Cycle HDR Modes | ESC=Quit");
+    const char* modeStr;
+    if (currentHDRComposition == SDL_GPU_SWAPCHAINCOMPOSITION_HDR10_ST2084) {
+        modeStr = "HDR10 PQ";
+    } else if (currentHDRComposition == SDL_GPU_SWAPCHAINCOMPOSITION_HDR_EXTENDED_LINEAR) {
+        modeStr = "HDR Extended";
+    } else {
+        modeStr = "SDR";
+    }
+    SDL_Log("Mode: %s", modeStr);
 
     // ------------------------------------------------------------------------
     // Render Loop
@@ -785,44 +822,54 @@ int main(int argc, char* argv[]) {
                         SDL_Log("VSync %s", vsyncEnabled ? "enabled" : "disabled");
                     }
                     else if (event.key.key == SDLK_F2) {
-                        bool wantHDR = !hdrEnabled;
-                        if (wantHDR) {
-                            // Query available HDR modes and get the best one
-                            SDL_GPUSwapchainComposition bestHDR = queryBestHDRComposition(device, window);
+                        // Cycle through modes: SDR -> HDR10 ST2084 -> HDR Extended Linear -> SDR
+                        SDL_GPUSwapchainComposition nextMode;
+                        const char* nextModeName = nullptr;
 
-                            if (bestHDR == SDL_GPU_SWAPCHAINCOMPOSITION_SDR) {
-                                // No HDR available
-                                SDL_Log("HDR not supported. On Windows, enable HDR in Settings -> Display -> HDR.");
+                        // Check which HDR modes are supported
+                        bool hdr10Supported = SDL_WindowSupportsGPUSwapchainComposition(device, window,
+                            SDL_GPU_SWAPCHAINCOMPOSITION_HDR10_ST2084);
+                        bool hdrExtendedSupported = SDL_WindowSupportsGPUSwapchainComposition(device, window,
+                            SDL_GPU_SWAPCHAINCOMPOSITION_HDR_EXTENDED_LINEAR);
+
+                        if (currentHDRComposition == SDL_GPU_SWAPCHAINCOMPOSITION_SDR) {
+                            // Currently SDR, try HDR10 ST2084 first
+                            if (hdr10Supported) {
+                                nextMode = SDL_GPU_SWAPCHAINCOMPOSITION_HDR10_ST2084;
+                                nextModeName = "HDR10 ST2084 (PQ)";
+                            } else if (hdrExtendedSupported) {
+                                nextMode = SDL_GPU_SWAPCHAINCOMPOSITION_HDR_EXTENDED_LINEAR;
+                                nextModeName = "HDR Extended Linear";
                             } else {
-                                // Get the appropriate color target format for this composition
-                                SDL_GPUTextureFormat colorFormat = getColorTargetFormatForComposition(bestHDR);
-
-                                bool success = setSwapchainParamsSafe(device, window,
-                                    bestHDR,
-                                    vsyncEnabled ? SDL_GPU_PRESENTMODE_VSYNC : SDL_GPU_PRESENTMODE_IMMEDIATE);
-                                if (success) {
-                                    hdrEnabled = true;
-                                    currentHDRComposition = bestHDR;
-                                    const char* modeName = (bestHDR == SDL_GPU_SWAPCHAINCOMPOSITION_HDR10_ST2084)
-                                        ? "HDR10 ST2084"
-                                        : "HDR Extended Linear";
-                                    SDL_Log("HDR enabled (%s) - Color format: %u", modeName, colorFormat);
-                                } else {
-                                    SDL_Log("Failed to enable HDR: %s", SDL_GetError());
-                                }
+                                SDL_Log("No HDR modes available. On Windows, enable HDR in Settings -> Display -> HDR.");
+                                continue;
+                            }
+                        } else if (currentHDRComposition == SDL_GPU_SWAPCHAINCOMPOSITION_HDR10_ST2084) {
+                            // Currently HDR10, try HDR Extended Linear next
+                            if (hdrExtendedSupported) {
+                                nextMode = SDL_GPU_SWAPCHAINCOMPOSITION_HDR_EXTENDED_LINEAR;
+                                nextModeName = "HDR Extended Linear";
+                            } else {
+                                // Fall back to SDR
+                                nextMode = SDL_GPU_SWAPCHAINCOMPOSITION_SDR;
+                                nextModeName = "SDR";
                             }
                         } else {
-                            // SDR is always supported; no need to check
-                            bool success = setSwapchainParamsSafe(device, window,
-                                SDL_GPU_SWAPCHAINCOMPOSITION_SDR,
-                                vsyncEnabled ? SDL_GPU_PRESENTMODE_VSYNC : SDL_GPU_PRESENTMODE_IMMEDIATE);
-                            if (success) {
-                                hdrEnabled = false;
-                                currentHDRComposition = SDL_GPU_SWAPCHAINCOMPOSITION_SDR;
-                                SDL_Log("HDR disabled (SDR)");
-                            } else {
-                                SDL_Log("Failed to disable HDR: %s", SDL_GetError());
-                            }
+                            // Currently HDR Extended Linear (or any other HDR), go to SDR
+                            nextMode = SDL_GPU_SWAPCHAINCOMPOSITION_SDR;
+                            nextModeName = "SDR";
+                        }
+
+                        // Apply the next mode
+                        bool success = setSwapchainParamsSafe(device, window,
+                            nextMode,
+                            vsyncEnabled ? SDL_GPU_PRESENTMODE_VSYNC : SDL_GPU_PRESENTMODE_IMMEDIATE);
+                        if (success) {
+                            currentHDRComposition = nextMode;
+                            hdrEnabled = (nextMode != SDL_GPU_SWAPCHAINCOMPOSITION_SDR);
+                            SDL_Log("Mode switched to: %s", nextModeName);
+                        } else {
+                            SDL_Log("Failed to switch to %s: %s", nextModeName, SDL_GetError());
                         }
                     }
                     break;
@@ -913,9 +960,13 @@ int main(int argc, char* argv[]) {
         SDL_GPUGraphicsPipeline* currentPipeline;
         {
             SDL_GPUTextureFormat currentFmt = SDL_GetGPUSwapchainTextureFormat(device, window);
-            currentPipeline = (currentFmt == SDL_GPU_TEXTUREFORMAT_R10G10B10A2_UNORM)
-                ? pipelineHDR
-                : pipelineSDR;
+            if (currentFmt == SDL_GPU_TEXTUREFORMAT_R10G10B10A2_UNORM) {
+                currentPipeline = pipelineHDR;  // HDR10 ST2084
+            } else if (currentFmt == SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT) {
+                currentPipeline = pipelineHDRExtended;  // HDR Extended Linear
+            } else {
+                currentPipeline = pipelineSDR;  // SDR (any other format)
+            }
         }
 
         SDL_GPUColorTargetInfo colorTarget = {};
@@ -956,11 +1007,19 @@ int main(int argc, char* argv[]) {
         if (elapsed >= 1000) {
             float fps = static_cast<float>(frameCount) * 1000.0f / static_cast<float>(elapsed);
             char title[128];
+            const char* modeStr;
+            if (currentHDRComposition == SDL_GPU_SWAPCHAINCOMPOSITION_HDR10_ST2084) {
+                modeStr = "HDR10 PQ";
+            } else if (currentHDRComposition == SDL_GPU_SWAPCHAINCOMPOSITION_HDR_EXTENDED_LINEAR) {
+                modeStr = "HDR Extended";
+            } else {
+                modeStr = "SDR";
+            }
             SDL_snprintf(title, sizeof(title),
-                "SDL3 GPU MVP - %.1f FPS | VSync: %s (F1) | HDR: %s (F2)",
+                "SDL3 GPU MVP - %.1f FPS | VSync: %s (F1) | Mode: %s (F2)",
                 fps,
                 vsyncEnabled ? "ON" : "OFF",
-                hdrEnabled   ? "ON" : "OFF");
+                modeStr);
             SDL_SetWindowTitle(window, title);
             frameCount  = 0;
             fpsLastTime = now;
@@ -980,6 +1039,7 @@ int main(int argc, char* argv[]) {
     SDL_ReleaseGPUBuffer(device, indexBuffer);
     SDL_ReleaseGPUGraphicsPipeline(device, pipelineSDR);
     SDL_ReleaseGPUGraphicsPipeline(device, pipelineHDR);
+    SDL_ReleaseGPUGraphicsPipeline(device, pipelineHDRExtended);
     SDL_ReleaseGPUSampler(device, sampler);
     SDL_ReleaseGPUTexture(device, texture);
     SDL_ReleaseWindowFromGPUDevice(device, window);
