@@ -100,6 +100,59 @@ static bool setSwapchainParamsSafe(
     return success;
 }
 
+// Query available HDR swapchain compositions and return the best available one.
+// Priority: HDR10_ST2084 > HDR_EXTENDED_LINEAR > SDR (if none available)
+static SDL_GPUSwapchainComposition queryBestHDRComposition(
+    SDL_GPUDevice* device,
+    SDL_Window* window)
+{
+    bool hdr10Supported = SDL_WindowSupportsGPUSwapchainComposition(device, window,
+        SDL_GPU_SWAPCHAINCOMPOSITION_HDR10_ST2084);
+    bool hdrExtendedSupported = SDL_WindowSupportsGPUSwapchainComposition(device, window,
+        SDL_GPU_SWAPCHAINCOMPOSITION_HDR_EXTENDED_LINEAR);
+
+    SDL_Log("=== HDR Evaluation Results ===");
+    SDL_Log("HDR10 ST2084 (PQ):       %s", hdr10Supported ? "AVAILABLE" : "NOT AVAILABLE");
+    SDL_Log("HDR Extended Linear:     %s", hdrExtendedSupported ? "AVAILABLE" : "NOT AVAILABLE");
+    SDL_Log("SDR:                     AVAILABLE (fallback)");
+    SDL_Log("===========================");
+
+    // Check HDR10 ST2084 first (PQ, higher peak brightness)
+    if (hdr10Supported) {
+        SDL_Log("Selected: HDR10 ST2084 (PQ) - Highest quality HDR");
+        return SDL_GPU_SWAPCHAINCOMPOSITION_HDR10_ST2084;
+    }
+
+    // Check HDR Extended Linear (scRGB, wider color gamut, extended range)
+    if (hdrExtendedSupported) {
+        SDL_Log("Selected: HDR Extended Linear (scRGB) - Wide color gamut with extended range");
+        return SDL_GPU_SWAPCHAINCOMPOSITION_HDR_EXTENDED_LINEAR;
+    }
+
+    // No HDR available
+    SDL_Log("Selected: SDR - No HDR modes available");
+    return SDL_GPU_SWAPCHAINCOMPOSITION_SDR;
+}
+
+// Get the texture format for a given swapchain composition
+static SDL_GPUTextureFormat getColorTargetFormatForComposition(
+    SDL_GPUSwapchainComposition composition)
+{
+    switch (composition) {
+        case SDL_GPU_SWAPCHAINCOMPOSITION_HDR10_ST2084:
+            // R10G10B10A2_UNORM is the standard format for HDR10 PQ
+            return SDL_GPU_TEXTUREFORMAT_R10G10B10A2_UNORM;
+        case SDL_GPU_SWAPCHAINCOMPOSITION_HDR_EXTENDED_LINEAR:
+            // R16G16B16A16_FLOAT is typically used for HDR Extended Linear (scRGB)
+            return SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+        case SDL_GPU_SWAPCHAINCOMPOSITION_SDR:
+        case SDL_GPU_SWAPCHAINCOMPOSITION_SDR_LINEAR:
+        default:
+            // SDR uses standard RGBA8
+            return SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    }
+}
+
 // ============================================================================
 // Main Application
 // ============================================================================
@@ -205,7 +258,8 @@ int main(int argc, char* argv[]) {
                         (color >> 24) & 0xFF,
                         (color >> 16) & 0xFF,
                         (color >>  8) & 0xFF,
-                        color         & 0xFF);
+                        (color      ) & 0xFF
+                    );
                 }
             }
         }
@@ -539,19 +593,29 @@ int main(int argc, char* argv[]) {
     //      or Windows HDR hasn't been enabled in Display Settings.
     // ------------------------------------------------------------------------
     bool hdrEnabled = false;
+    SDL_GPUSwapchainComposition currentHDRComposition = SDL_GPU_SWAPCHAINCOMPOSITION_SDR;
 
     if (settings.hdrEnabled) {
-        if (!SDL_WindowSupportsGPUSwapchainComposition(device, window,
-                SDL_GPU_SWAPCHAINCOMPOSITION_HDR_EXTENDED_LINEAR)) {
-            SDL_Log("HDR Extended Linear is not supported on this display/system.");
+        // Query available HDR modes and get the best one
+        SDL_GPUSwapchainComposition bestHDR = queryBestHDRComposition(device, window);
+
+        if (bestHDR == SDL_GPU_SWAPCHAINCOMPOSITION_SDR) {
+            SDL_Log("HDR not supported on this display/system.");
             SDL_Log("On Windows: ensure HDR is enabled in Settings -> Display -> HDR.");
         } else {
+            // Get the appropriate color target format for this composition
+            SDL_GPUTextureFormat colorFormat = getColorTargetFormatForComposition(bestHDR);
+
             bool success = setSwapchainParamsSafe(device, window,
-                SDL_GPU_SWAPCHAINCOMPOSITION_HDR_EXTENDED_LINEAR,
+                bestHDR,
                 SDL_GPU_PRESENTMODE_VSYNC);
             if (success) {
                 hdrEnabled = true;
-                SDL_Log("HDR mode enabled: HDR Extended Linear");
+                currentHDRComposition = bestHDR;
+                const char* modeName = (bestHDR == SDL_GPU_SWAPCHAINCOMPOSITION_HDR10_ST2084)
+                    ? "HDR10 ST2084"
+                    : "HDR Extended Linear";
+                SDL_Log("HDR mode enabled: %s (Color format: %u)", modeName, colorFormat);
             } else {
                 SDL_Log("HDR setup failed despite support check: %s", SDL_GetError());
             }
@@ -707,7 +771,7 @@ int main(int argc, char* argv[]) {
                     else if (event.key.key == SDLK_F1) {
                         vsyncEnabled = !vsyncEnabled;
                         SDL_GPUSwapchainComposition composition = hdrEnabled
-                            ? SDL_GPU_SWAPCHAINCOMPOSITION_HDR10_ST2084
+                            ? currentHDRComposition
                             : SDL_GPU_SWAPCHAINCOMPOSITION_SDR;
                         SDL_GPUPresentMode presentMode = vsyncEnabled
                             ? SDL_GPU_PRESENTMODE_VSYNC
@@ -718,19 +782,26 @@ int main(int argc, char* argv[]) {
                     else if (event.key.key == SDLK_F2) {
                         bool wantHDR = !hdrEnabled;
                         if (wantHDR) {
-                            // FIX: Always check support before attempting to enable.
-                            // This is what produces the "not supported" error on DX12
-                            // when the display/OS doesn't have HDR active.
-                            if (!SDL_WindowSupportsGPUSwapchainComposition(device, window,
-                                SDL_GPU_SWAPCHAINCOMPOSITION_HDR10_ST2084)) {
+                            // Query available HDR modes and get the best one
+                            SDL_GPUSwapchainComposition bestHDR = queryBestHDRComposition(device, window);
+
+                            if (bestHDR == SDL_GPU_SWAPCHAINCOMPOSITION_SDR) {
+                                // No HDR available
                                 SDL_Log("HDR not supported. On Windows, enable HDR in Settings -> Display -> HDR.");
                             } else {
+                                // Get the appropriate color target format for this composition
+                                SDL_GPUTextureFormat colorFormat = getColorTargetFormatForComposition(bestHDR);
+
                                 bool success = setSwapchainParamsSafe(device, window,
-                                    SDL_GPU_SWAPCHAINCOMPOSITION_HDR10_ST2084,
+                                    bestHDR,
                                     vsyncEnabled ? SDL_GPU_PRESENTMODE_VSYNC : SDL_GPU_PRESENTMODE_IMMEDIATE);
                                 if (success) {
                                     hdrEnabled = true;
-                                    SDL_Log("HDR enabled (HDR10 ST2084)");
+                                    currentHDRComposition = bestHDR;
+                                    const char* modeName = (bestHDR == SDL_GPU_SWAPCHAINCOMPOSITION_HDR10_ST2084)
+                                        ? "HDR10 ST2084"
+                                        : "HDR Extended Linear";
+                                    SDL_Log("HDR enabled (%s) - Color format: %u", modeName, colorFormat);
                                 } else {
                                     SDL_Log("Failed to enable HDR: %s", SDL_GetError());
                                 }
@@ -742,6 +813,7 @@ int main(int argc, char* argv[]) {
                                 vsyncEnabled ? SDL_GPU_PRESENTMODE_VSYNC : SDL_GPU_PRESENTMODE_IMMEDIATE);
                             if (success) {
                                 hdrEnabled = false;
+                                currentHDRComposition = SDL_GPU_SWAPCHAINCOMPOSITION_SDR;
                                 SDL_Log("HDR disabled (SDR)");
                             } else {
                                 SDL_Log("Failed to disable HDR: %s", SDL_GetError());

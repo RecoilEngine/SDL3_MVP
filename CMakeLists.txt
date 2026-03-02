@@ -20,15 +20,15 @@ FetchContent_Declare(
 # Make SDL3 available
 FetchContent_MakeAvailable(SDL3)
 
-# Find DXC for HLSL compilation (Windows only)
-if(WIN32)
-    find_program(DXC dxc HINTS
-        "$ENV{VULKAN_SDK}/Bin"
-        "$ENV{VULKAN_SDK}/bin"
-        "C:/Program Files (x86)/Windows Kits/10/bin/10.0.22621.0/x64"
-        "C:/Program Files (x86)/Windows Kits/10/bin/10.0.22000.0/x64"
-    )
-endif()
+# Find DXC for HLSL compilation
+find_program(DXC dxc HINTS
+    "$ENV{VULKAN_SDK}/Bin"
+    "$ENV{VULKAN_SDK}/bin"
+    "/usr/bin"
+    "/usr/local/bin"
+    "C:/Program Files (x86)/Windows Kits/10/bin/10.0.22621.0/x64"
+    "C:/Program Files (x86)/Windows Kits/10/bin/10.0.22000.0/x64"
+)
 
 # Shader compilation function for SPIR-V (Vulkan) using DXC
 function(compile_spirv input_file output_file shader_stage)
