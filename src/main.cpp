@@ -70,27 +70,39 @@ enum class GPUBackend {
     D3D12       // Force D3D12 (Windows only)
 };
 
-GPUBackend parseBackend(int argc, char* argv[]) {
+// ============================================================================
+// Application Settings (parsed from command line)
+// ============================================================================
+struct AppSettings {
+    GPUBackend backend = GPUBackend::AUTO;
+    bool hdrEnabled = false;  // HDR mode flag
+};
+
+AppSettings parseCommandLine(int argc, char* argv[]) {
+    AppSettings settings;
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--vulkan") == 0) {
-            return GPUBackend::VULKAN;
+            settings.backend = GPUBackend::VULKAN;
         } else if (strcmp(argv[i], "--d3d12") == 0 || strcmp(argv[i], "--dx12") == 0) {
-            return GPUBackend::D3D12;
+            settings.backend = GPUBackend::D3D12;
+        } else if (strcmp(argv[i], "--hdr") == 0) {
+            settings.hdrEnabled = true;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-            SDL_Log("Usage: %s [--vulkan|--d3d12]", argv[0]);
+            SDL_Log("Usage: %s [--vulkan|--d3d12] [--hdr]", argv[0]);
             SDL_Log("  --vulkan  : Use Vulkan backend with SPIR-V shaders");
             SDL_Log("  --d3d12   : Use D3D12 backend with DXIL shaders (Windows only)");
+            SDL_Log("  --hdr     : Start in HDR mode (toggle with F2)");
             SDL_Log("  (no args) : Auto-select backend (D3D12 on Windows, Vulkan on Linux)");
         }
     }
-    return GPUBackend::AUTO;
+    return settings;
 }
 
 // ============================================================================
 // Main Application
 // ============================================================================
 int main(int argc, char* argv[]) {
-    GPUBackend backend = parseBackend(argc, argv);
+    AppSettings settings = parseCommandLine(argc, argv);
 
     // --------------------------------------------------------------------
     // SDL Initialization
@@ -125,7 +137,7 @@ int main(int argc, char* argv[]) {
     const char* shaderExtension = ".spv";
     const char* shaderFormatName = "SPIR-V";
 
-    switch (backend) {
+    switch (settings.backend) {
         case GPUBackend::VULKAN:
             driverName = "vulkan";
             shaderFormat = SDL_GPU_SHADERFORMAT_SPIRV;
@@ -177,6 +189,25 @@ int main(int argc, char* argv[]) {
         SDL_DestroyWindow(window);
         SDL_Quit();
         return 1;
+    }
+
+    // --------------------------------------------------------------------
+    // Configure HDR Swapchain (if requested)
+    // --------------------------------------------------------------------
+    bool hdrEnabled = settings.hdrEnabled;  // Runtime HDR state (can be toggled)
+
+    if (hdrEnabled) {
+        // Try to enable HDR mode
+        bool hdrSuccess = SDL_SetGPUSwapchainParameters(device, window,
+            SDL_GPU_SWAPCHAINCOMPOSITION_HDR_EXTENDED_LINEAR,
+            SDL_GPU_PRESENTMODE_VSYNC);
+
+        if (hdrSuccess) {
+            SDL_Log("HDR mode enabled: HDR Extended Linear");
+        } else {
+            SDL_Log("HDR mode not available, falling back to SDR: %s", SDL_GetError());
+            hdrEnabled = false;
+        }
     }
 
     // --------------------------------------------------------------------
@@ -419,9 +450,11 @@ int main(int argc, char* argv[]) {
     }
 
     // --------------------------------------------------------------------
-    // Create Graphics Pipeline
+    // Create Graphics Pipelines (SDR and HDR)
+    // We need separate pipelines because HDR uses a different swapchain format
     // --------------------------------------------------------------------
-    SDL_GPUGraphicsPipeline* pipeline = nullptr;
+    SDL_GPUGraphicsPipeline* pipelineSDR = nullptr;
+    SDL_GPUGraphicsPipeline* pipelineHDR = nullptr;
 
     {
         // Vertex input state - now 3 attributes (position, texcoord, color)
@@ -474,13 +507,9 @@ int main(int argc, char* argv[]) {
                                        SDL_GPU_COLORCOMPONENT_G |
                                        SDL_GPU_COLORCOMPONENT_R;
 
-        SDL_GPUColorTargetDescription colorTargetDesc = {};
-        colorTargetDesc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
-        colorTargetDesc.blend_state = blendState;
-
+        // Common target info structure
         SDL_GPUGraphicsPipelineTargetInfo targetInfo = {};
         targetInfo.num_color_targets = 1;
-        targetInfo.color_target_descriptions = &colorTargetDesc;
         targetInfo.depth_stencil_format = SDL_GPU_TEXTUREFORMAT_INVALID;
         targetInfo.has_depth_stencil_target = false;
 
@@ -493,18 +522,53 @@ int main(int argc, char* argv[]) {
         pipelineInfo.rasterizer_state = rasterizerState;
         pipelineInfo.target_info = targetInfo;
 
-        pipeline = SDL_CreateGPUGraphicsPipeline(device, &pipelineInfo);
-        if (!pipeline) {
-            SDL_Log("Failed to create graphics pipeline: %s", SDL_GetError());
-            SDL_ReleaseGPUShader(device, fragmentShader);
-            SDL_ReleaseGPUShader(device, vertexShader);
-            SDL_ReleaseGPUSampler(device, sampler);
-            SDL_ReleaseGPUTexture(device, texture);
-            SDL_ReleaseWindowFromGPUDevice(device, window);
-            SDL_DestroyGPUDevice(device);
-            SDL_DestroyWindow(window);
-            SDL_Quit();
-            return 1;
+        // Create SDR pipeline (uses current swapchain format - should be B8G8R8A8 or similar)
+        {
+            SDL_GPUColorTargetDescription colorTargetDesc = {};
+            colorTargetDesc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
+            colorTargetDesc.blend_state = blendState;
+
+            pipelineInfo.target_info.color_target_descriptions = &colorTargetDesc;
+
+            pipelineSDR = SDL_CreateGPUGraphicsPipeline(device, &pipelineInfo);
+            if (!pipelineSDR) {
+                SDL_Log("Failed to create SDR graphics pipeline: %s", SDL_GetError());
+                SDL_ReleaseGPUShader(device, fragmentShader);
+                SDL_ReleaseGPUShader(device, vertexShader);
+                SDL_ReleaseGPUSampler(device, sampler);
+                SDL_ReleaseGPUTexture(device, texture);
+                SDL_ReleaseWindowFromGPUDevice(device, window);
+                SDL_DestroyGPUDevice(device);
+                SDL_DestroyWindow(window);
+                SDL_Quit();
+                return 1;
+            }
+            SDL_Log("Created SDR pipeline with format: %d", (int)colorTargetDesc.format);
+        }
+
+        // Create HDR pipeline (uses R16G16B16A16_SFLOAT for HDR swapchain)
+        {
+            SDL_GPUColorTargetDescription colorTargetDesc = {};
+            colorTargetDesc.format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+            colorTargetDesc.blend_state = blendState;
+
+            pipelineInfo.target_info.color_target_descriptions = &colorTargetDesc;
+
+            pipelineHDR = SDL_CreateGPUGraphicsPipeline(device, &pipelineInfo);
+            if (!pipelineHDR) {
+                SDL_Log("Failed to create HDR graphics pipeline: %s", SDL_GetError());
+                SDL_ReleaseGPUGraphicsPipeline(device, pipelineSDR);
+                SDL_ReleaseGPUShader(device, fragmentShader);
+                SDL_ReleaseGPUShader(device, vertexShader);
+                SDL_ReleaseGPUSampler(device, sampler);
+                SDL_ReleaseGPUTexture(device, texture);
+                SDL_ReleaseWindowFromGPUDevice(device, window);
+                SDL_DestroyGPUDevice(device);
+                SDL_DestroyWindow(window);
+                SDL_Quit();
+                return 1;
+            }
+            SDL_Log("Created HDR pipeline with format: R16G16B16A16_FLOAT");
         }
     }
 
@@ -528,7 +592,8 @@ int main(int argc, char* argv[]) {
         indexBuffer = SDL_CreateGPUBuffer(device, &bufferInfo);
         if (!indexBuffer) {
             SDL_Log("Failed to create index buffer: %s", SDL_GetError());
-            SDL_ReleaseGPUGraphicsPipeline(device, pipeline);
+            SDL_ReleaseGPUGraphicsPipeline(device, pipelineSDR);
+            SDL_ReleaseGPUGraphicsPipeline(device, pipelineHDR);
             SDL_ReleaseGPUSampler(device, sampler);
             SDL_ReleaseGPUTexture(device, texture);
             SDL_ReleaseWindowFromGPUDevice(device, window);
@@ -547,7 +612,8 @@ int main(int argc, char* argv[]) {
         if (!transferBuffer) {
             SDL_Log("Failed to create transfer buffer: %s", SDL_GetError());
             SDL_ReleaseGPUBuffer(device, indexBuffer);
-            SDL_ReleaseGPUGraphicsPipeline(device, pipeline);
+            SDL_ReleaseGPUGraphicsPipeline(device, pipelineSDR);
+            SDL_ReleaseGPUGraphicsPipeline(device, pipelineHDR);
             SDL_ReleaseGPUSampler(device, sampler);
             SDL_ReleaseGPUTexture(device, texture);
             SDL_ReleaseWindowFromGPUDevice(device, window);
@@ -606,7 +672,8 @@ int main(int argc, char* argv[]) {
         if (!vertexBuffer) {
             SDL_Log("Failed to create vertex buffer: %s", SDL_GetError());
             SDL_ReleaseGPUBuffer(device, indexBuffer);
-            SDL_ReleaseGPUGraphicsPipeline(device, pipeline);
+            SDL_ReleaseGPUGraphicsPipeline(device, pipelineSDR);
+            SDL_ReleaseGPUGraphicsPipeline(device, pipelineHDR);
             SDL_ReleaseGPUSampler(device, sampler);
             SDL_ReleaseGPUTexture(device, texture);
             SDL_ReleaseWindowFromGPUDevice(device, window);
@@ -626,7 +693,8 @@ int main(int argc, char* argv[]) {
             SDL_Log("Failed to create vertex transfer buffer: %s", SDL_GetError());
             SDL_ReleaseGPUBuffer(device, vertexBuffer);
             SDL_ReleaseGPUBuffer(device, indexBuffer);
-            SDL_ReleaseGPUGraphicsPipeline(device, pipeline);
+            SDL_ReleaseGPUGraphicsPipeline(device, pipelineSDR);
+            SDL_ReleaseGPUGraphicsPipeline(device, pipelineHDR);
             SDL_ReleaseGPUSampler(device, sampler);
             SDL_ReleaseGPUTexture(device, texture);
             SDL_ReleaseWindowFromGPUDevice(device, window);
@@ -640,6 +708,8 @@ int main(int argc, char* argv[]) {
     SDL_Log("SDL3 GPU MVP initialized successfully!");
     SDL_Log("Textured rectangle with color drift effect");
     SDL_Log("Color drifts: Blue -> Orange");
+    SDL_Log("Controls: F1=Toggle VSync | F2=Toggle HDR | ESC=Quit");
+    SDL_Log("HDR mode: %s", hdrEnabled ? "ENABLED (2x brightness)" : "disabled");
 
     // --------------------------------------------------------------------
     // SDL2-Style Event Loop
@@ -670,10 +740,35 @@ int main(int argc, char* argv[]) {
                     else if (event.key.key == SDLK_F1) {
                         // Toggle VSync
                         vsyncEnabled = !vsyncEnabled;
-                        SDL_SetGPUSwapchainParameters(device, window,
-                            vsyncEnabled ? SDL_GPU_SWAPCHAINCOMPOSITION_SDR : SDL_GPU_SWAPCHAINCOMPOSITION_SDR,
-                            vsyncEnabled ? SDL_GPU_PRESENTMODE_VSYNC : SDL_GPU_PRESENTMODE_IMMEDIATE);
+                        {
+                            SDL_GPUSwapchainComposition composition = hdrEnabled
+                                ? SDL_GPU_SWAPCHAINCOMPOSITION_HDR_EXTENDED_LINEAR
+                                : SDL_GPU_SWAPCHAINCOMPOSITION_SDR;
+                            SDL_GPUPresentMode presentMode = vsyncEnabled
+                                ? SDL_GPU_PRESENTMODE_VSYNC
+                                : SDL_GPU_PRESENTMODE_IMMEDIATE;
+                            SDL_SetGPUSwapchainParameters(device, window, composition, presentMode);
+                        }
                         SDL_Log("VSync %s", vsyncEnabled ? "enabled" : "disabled");
+                    }
+                    else if (event.key.key == SDLK_F2) {
+                        // Toggle HDR mode
+                        hdrEnabled = !hdrEnabled;
+                        {
+                            SDL_GPUSwapchainComposition composition = hdrEnabled
+                                ? SDL_GPU_SWAPCHAINCOMPOSITION_HDR_EXTENDED_LINEAR
+                                : SDL_GPU_SWAPCHAINCOMPOSITION_SDR;
+                            SDL_GPUPresentMode presentMode = vsyncEnabled
+                                ? SDL_GPU_PRESENTMODE_VSYNC
+                                : SDL_GPU_PRESENTMODE_IMMEDIATE;
+                            bool success = SDL_SetGPUSwapchainParameters(device, window, composition, presentMode);
+                            if (!success) {
+                                SDL_Log("Failed to toggle HDR mode: %s", SDL_GetError());
+                                hdrEnabled = !hdrEnabled;  // Revert state
+                            } else {
+                                SDL_Log("HDR mode %s", hdrEnabled ? "enabled (HDR Extended Linear)" : "disabled (SDR)");
+                            }
+                        }
                     }
                     break;
 
@@ -686,6 +781,7 @@ int main(int argc, char* argv[]) {
         // --------------------------------------------------------------------
         // Update Vertex Buffer (CPU-side, uploaded to GPU each frame)
         // Rectangle with colors that drift from Blue to Orange
+        // In HDR mode, colors can exceed 1.0 for extended brightness
         // --------------------------------------------------------------------
         {
             float time = static_cast<float>(SDL_GetTicks() - startTime) / 1000.0f;
@@ -696,12 +792,16 @@ int main(int argc, char* argv[]) {
             float t = (std::sin(time * 0.5f) + 1.0f) * 0.5f;
             lerpColor(tintColor, COLOR_BLUE, COLOR_ORANGE, t);
 
+            // In HDR mode, boost colors to demonstrate extended range
+            // HDR allows values > 1.0 for brighter highlights
+            float hdrScale = hdrEnabled ? 2.0f : 1.0f;  // 2x brightness in HDR
+
             // Rectangle vertices covering the window (-1 to 1)
             // 0: top-left, 1: top-right, 2: bottom-right, 3: bottom-left
-            cpuVertexData[0] = Vertex{{-1.0f + offset, -1.0f + offset}, {0.0f, 0.0f}, {tintColor[0], tintColor[1], tintColor[2], 1.0f}};
-            cpuVertexData[1] = Vertex{{ 1.0f - offset, -1.0f + offset}, {1.0f, 0.0f}, {tintColor[0], tintColor[1], tintColor[2], 1.0f}};
-            cpuVertexData[2] = Vertex{{ 1.0f - offset,  1.0f - offset}, {1.0f, 1.0f}, {tintColor[0], tintColor[1], tintColor[2], 1.0f}};
-            cpuVertexData[3] = Vertex{{-1.0f + offset,  1.0f - offset}, {0.0f, 1.0f}, {tintColor[0], tintColor[1], tintColor[2], 1.0f}};
+            cpuVertexData[0] = Vertex{{-1.0f + offset, -1.0f + offset}, {0.0f, 0.0f}, {tintColor[0] * hdrScale, tintColor[1] * hdrScale, tintColor[2] * hdrScale, 1.0f}};
+            cpuVertexData[1] = Vertex{{ 1.0f - offset, -1.0f + offset}, {1.0f, 0.0f}, {tintColor[0] * hdrScale, tintColor[1] * hdrScale, tintColor[2] * hdrScale, 1.0f}};
+            cpuVertexData[2] = Vertex{{ 1.0f - offset,  1.0f - offset}, {1.0f, 1.0f}, {tintColor[0] * hdrScale, tintColor[1] * hdrScale, tintColor[2] * hdrScale, 1.0f}};
+            cpuVertexData[3] = Vertex{{-1.0f + offset,  1.0f - offset}, {0.0f, 1.0f}, {tintColor[0] * hdrScale, tintColor[1] * hdrScale, tintColor[2] * hdrScale, 1.0f}};
 
             // Map transfer buffer and copy CPU data
             void* mapPtr = SDL_MapGPUTransferBuffer(device, vertexTransferBuffer, true);
@@ -771,7 +871,9 @@ int main(int argc, char* argv[]) {
         SDL_GPURenderPass* renderPass = SDL_BeginGPURenderPass(cmdBuf, &colorTarget, 1, nullptr);
         if (renderPass) {
             // Bind pipeline
-            SDL_BindGPUGraphicsPipeline(renderPass, pipeline);
+            // Select the correct pipeline based on current HDR mode
+            SDL_GPUGraphicsPipeline* currentPipeline = hdrEnabled ? pipelineHDR : pipelineSDR;
+            SDL_BindGPUGraphicsPipeline(renderPass, currentPipeline);
 
             // Bind vertex buffer
             SDL_GPUBufferBinding vertexBinding = {};
@@ -812,9 +914,11 @@ int main(int argc, char* argv[]) {
         // Update window title every second
         if (elapsedTime >= 1000) {
             float fps = static_cast<float>(frameCount) * 1000.0f / static_cast<float>(elapsedTime);
-            char title[64];
-            SDL_snprintf(title, sizeof(title), "SDL3 GPU MVP - %.1f FPS - VSync: %s (F1 to toggle)",
-                fps, vsyncEnabled ? "ON" : "OFF");
+            char title[128];
+            SDL_snprintf(title, sizeof(title), "SDL3 GPU MVP - %.1f FPS | VSync: %s (F1) | HDR: %s (F2)",
+                fps,
+                vsyncEnabled ? "ON" : "OFF",
+                hdrEnabled ? "ON" : "OFF");
             SDL_SetWindowTitle(window, title);
 
             // Reset counters
@@ -831,7 +935,8 @@ int main(int argc, char* argv[]) {
     SDL_ReleaseGPUTransferBuffer(device, vertexTransferBuffer);
     SDL_ReleaseGPUBuffer(device, vertexBuffer);
     SDL_ReleaseGPUBuffer(device, indexBuffer);
-    SDL_ReleaseGPUGraphicsPipeline(device, pipeline);
+    SDL_ReleaseGPUGraphicsPipeline(device, pipelineSDR);
+    SDL_ReleaseGPUGraphicsPipeline(device, pipelineHDR);
     SDL_ReleaseGPUSampler(device, sampler);
     SDL_ReleaseGPUTexture(device, texture);
     SDL_ReleaseWindowFromGPUDevice(device, window);
