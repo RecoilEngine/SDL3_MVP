@@ -8,6 +8,7 @@
 #include <vector>
 #include <fstream>
 #include <string>
+#include <stdlib.h>
 
 // ============================================================================
 // Configuration
@@ -62,6 +63,10 @@ struct AppSettings {
     GPUBackend backend    = GPUBackend::AUTO;
     bool       hdrEnabled = false;
 };
+
+bool isRunningUnderRenderdoc() {
+    return getenv("ENABLE_VULKAN_RENDERDOC_CAPTURE") != nullptr;;
+}
 
 AppSettings parseCommandLine(int argc, char* argv[]) {
     AppSettings settings;
@@ -201,7 +206,7 @@ int main(int argc, char* argv[]) {
             break;
     }
 
-    SDL_GPUDevice* device = SDL_CreateGPUDevice(requestedFormats, true, requestedDriverName);
+    SDL_GPUDevice* device = SDL_CreateGPUDevice(requestedFormats, !isRunningUnderRenderdoc(), requestedDriverName);
     if (!device) {
         SDL_Log("Failed to create GPU device: %s", SDL_GetError());
         SDL_DestroyWindow(window);
