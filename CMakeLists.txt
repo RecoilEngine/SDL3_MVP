@@ -29,8 +29,18 @@ find_program(GLSLANG_VALIDATOR glslangValidator HINTS
     "$ENV{VULKAN_SDK}/bin"
 )
 
-# Shader compilation function
-function(compile_shader input_file output_file shader_stage)
+# Find DXC for HLSL compilation (Windows only)
+if(WIN32)
+    find_program(DXC dxc HINTS
+        "$ENV{VULKAN_SDK}/Bin"
+        "$ENV{VULKAN_SDK}/bin"
+        "C:/Program Files (x86)/Windows Kits/10/bin/10.0.22621.0/x64"
+        "C:/Program Files (x86)/Windows Kits/10/bin/10.0.22000.0/x64"
+    )
+endif()
+
+# Shader compilation function for SPIR-V (Vulkan)
+function(compile_spirv input_file output_file shader_stage)
     if(GLSLANG_VALIDATOR)
         add_custom_command(
             OUTPUT ${output_file}
@@ -52,9 +62,27 @@ function(compile_shader input_file output_file shader_stage)
             COMMENT "Compiling ${input_file} to SPIR-V"
         )
     else()
-        # If no shader compiler, create a dummy file and warn
         file(WRITE ${output_file} "")
-        message(WARNING "No shader compiler found. Shaders must be pre-compiled.")
+        message(WARNING "No glslangValidator found. SPIR-V shaders must be pre-compiled.")
+    endif()
+endfunction()
+
+# Shader compilation function for DXIL (D3D12)
+function(compile_dxil input_file output_file shader_stage)
+    if(DXC)
+        add_custom_command(
+            OUTPUT ${output_file}
+            COMMAND ${DXC}
+                -T ${shader_stage}_6_0
+                -E main
+                -Fo ${output_file}
+                ${input_file}
+            DEPENDS ${input_file}
+            COMMENT "Compiling ${input_file} to DXIL"
+        )
+    else()
+        file(WRITE ${output_file} "")
+        message(WARNING "No DXC found. DXIL shaders must be pre-compiled.")
     endif()
 endfunction()
 
@@ -63,8 +91,15 @@ set(SHADER_DIR ${CMAKE_SOURCE_DIR}/shaders)
 set(BUILT_SHADER_DIR ${CMAKE_BINARY_DIR}/shaders)
 file(MAKE_DIRECTORY ${BUILT_SHADER_DIR})
 
-compile_shader(${SHADER_DIR}/triangle.vert ${BUILT_SHADER_DIR}/triangle.vert.spv vert)
-compile_shader(${SHADER_DIR}/triangle.frag ${BUILT_SHADER_DIR}/triangle.frag.spv frag)
+# SPIR-V shaders for Vulkan
+compile_spirv(${SHADER_DIR}/triangle.vert ${BUILT_SHADER_DIR}/triangle.vert.spv vert)
+compile_spirv(${SHADER_DIR}/triangle.frag ${BUILT_SHADER_DIR}/triangle.frag.spv frag)
+
+# DXIL shaders for D3D12 (Windows only)
+if(WIN32)
+    compile_dxil(${SHADER_DIR}/triangle.vert.hlsl ${BUILT_SHADER_DIR}/triangle.vert.dxil vs)
+    compile_dxil(${SHADER_DIR}/triangle.frag.hlsl ${BUILT_SHADER_DIR}/triangle.frag.dxil ps)
+endif()
 
 add_custom_target(shaders ALL DEPENDS
     ${BUILT_SHADER_DIR}/triangle.vert.spv
@@ -76,7 +111,20 @@ add_executable(${PROJECT_NAME}
     src/main.cpp
 )
 
+# Define shaders_dxil target for DXIL shaders
+if(WIN32 AND DXC)
+    add_custom_target(shaders_dxil ALL DEPENDS
+        ${BUILT_SHADER_DIR}/triangle.vert.dxil
+        ${BUILT_SHADER_DIR}/triangle.frag.dxil
+    )
+endif()
+
 add_dependencies(${PROJECT_NAME} shaders)
+
+# Add DXIL shader dependencies on Windows
+if(WIN32 AND DXC)
+    add_dependencies(${PROJECT_NAME} shaders_dxil)
+endif()
 
 # Link SDL3
 target_link_libraries(${PROJECT_NAME} PRIVATE SDL3::SDL3)

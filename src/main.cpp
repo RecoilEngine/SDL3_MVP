@@ -59,11 +59,35 @@ std::vector<uint8_t> loadShaderFile(const char* filename) {
 }
 
 // ============================================================================
+// GPU Backend Selection
+// ============================================================================
+enum class GPUBackend {
+    AUTO,       // Let SDL choose (default)
+    VULKAN,     // Force Vulkan
+    D3D12       // Force D3D12 (Windows only)
+};
+
+GPUBackend parseBackend(int argc, char* argv[]) {
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--vulkan") == 0) {
+            return GPUBackend::VULKAN;
+        } else if (strcmp(argv[i], "--d3d12") == 0 || strcmp(argv[i], "--dx12") == 0) {
+            return GPUBackend::D3D12;
+        } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            SDL_Log("Usage: %s [--vulkan|--d3d12]", argv[0]);
+            SDL_Log("  --vulkan  : Use Vulkan backend with SPIR-V shaders");
+            SDL_Log("  --d3d12   : Use D3D12 backend with DXIL shaders (Windows only)");
+            SDL_Log("  (no args) : Auto-select backend (D3D12 on Windows, Vulkan on Linux)");
+        }
+    }
+    return GPUBackend::AUTO;
+}
+
+// ============================================================================
 // Main Application
 // ============================================================================
 int main(int argc, char* argv[]) {
-    (void)argc;
-    (void)argv;
+    GPUBackend backend = parseBackend(argc, argv);
 
     // --------------------------------------------------------------------
     // SDL Initialization
@@ -90,12 +114,48 @@ int main(int argc, char* argv[]) {
     }
 
     // --------------------------------------------------------------------
-    // Create GPU Device
+    // Create GPU Device with selected backend
     // --------------------------------------------------------------------
+    const char* driverName = nullptr;  // nullptr = auto-select
+    SDL_GPUShaderFormat shaderFormat;
+    const char* backendName = "Auto";
+    const char* shaderExtension = ".spv";
+    const char* shaderFormatName = "SPIR-V";
+    
+    switch (backend) {
+        case GPUBackend::VULKAN:
+            driverName = "vulkan";
+            shaderFormat = SDL_GPU_SHADERFORMAT_SPIRV;
+            backendName = "Vulkan";
+            shaderExtension = ".spv";
+            shaderFormatName = "SPIR-V";
+            break;
+            
+        case GPUBackend::D3D12:
+            driverName = "direct3d12";
+            shaderFormat = SDL_GPU_SHADERFORMAT_DXIL;
+            backendName = "D3D12";
+            shaderExtension = ".dxil";
+            shaderFormatName = "DXIL";
+            break;
+            
+        case GPUBackend::AUTO:
+        default:
+            // Support all formats and let SDL choose
+            shaderFormat = SDL_GPU_SHADERFORMAT_SPIRV | SDL_GPU_SHADERFORMAT_DXBC | SDL_GPU_SHADERFORMAT_DXIL;
+            backendName = "Auto";
+            shaderExtension = ".spv";  // Default to SPIR-V for auto
+            shaderFormatName = "SPIR-V";
+            break;
+    }
+    
+    SDL_Log("Requested GPU Backend: %s", backendName);
+    SDL_Log("Shader Format: %s", shaderFormatName);
+    
     SDL_GPUDevice* device = SDL_CreateGPUDevice(
-        SDL_GPU_SHADERFORMAT_SPIRV | SDL_GPU_SHADERFORMAT_DXBC | SDL_GPU_SHADERFORMAT_DXIL | SDL_GPU_SHADERFORMAT_METALLIB,
-        true,  // debug mode
-        nullptr  // prefer default device
+        shaderFormat,
+        true,      // debug mode
+        driverName // specific driver or nullptr for auto
     );
 
     if (!device) {
@@ -123,8 +183,8 @@ int main(int argc, char* argv[]) {
     SDL_GPUShader* fragmentShader = nullptr;
 
     {
-        // Load vertex shader
-        std::string vertPath = "shaders/triangle.vert.spv";
+        // Load vertex shader with correct extension for selected backend
+        std::string vertPath = std::string("shaders/triangle.vert") + shaderExtension;
         std::vector<uint8_t> vertCode = loadShaderFile(vertPath.c_str());
         if (vertCode.empty()) {
             SDL_Log("Failed to load vertex shader from: %s", vertPath.c_str());
@@ -139,7 +199,7 @@ int main(int argc, char* argv[]) {
         vertShaderInfo.code = vertCode.data();
         vertShaderInfo.code_size = vertCode.size();
         vertShaderInfo.entrypoint = "main";
-        vertShaderInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
+        vertShaderInfo.format = shaderFormat;
         vertShaderInfo.stage = SDL_GPU_SHADERSTAGE_VERTEX;
         vertShaderInfo.num_samplers = 0;
         vertShaderInfo.num_storage_buffers = 0;
@@ -156,8 +216,8 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        // Load fragment shader
-        std::string fragPath = "shaders/triangle.frag.spv";
+        // Load fragment shader with correct extension for selected backend
+        std::string fragPath = std::string("shaders/triangle.frag") + shaderExtension;
         std::vector<uint8_t> fragCode = loadShaderFile(fragPath.c_str());
         if (fragCode.empty()) {
             SDL_Log("Failed to load fragment shader from: %s", fragPath.c_str());
@@ -173,7 +233,7 @@ int main(int argc, char* argv[]) {
         fragShaderInfo.code = fragCode.data();
         fragShaderInfo.code_size = fragCode.size();
         fragShaderInfo.entrypoint = "main";
-        fragShaderInfo.format = SDL_GPU_SHADERFORMAT_SPIRV;
+        fragShaderInfo.format = shaderFormat;
         fragShaderInfo.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
         fragShaderInfo.num_samplers = 0;
         fragShaderInfo.num_storage_buffers = 0;
