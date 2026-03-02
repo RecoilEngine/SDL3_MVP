@@ -7,31 +7,29 @@
 #include <cstring>
 #include <vector>
 #include <fstream>
+#include <string>
 
 // ============================================================================
 // Configuration
 // ============================================================================
-constexpr int WINDOW_WIDTH = 800;
+constexpr int WINDOW_WIDTH  = 800;
 constexpr int WINDOW_HEIGHT = 600;
 
-// Color drift: Blue -> Orange
-constexpr float COLOR_BLUE[4] = {0.0f, 0.4f, 0.8f, 1.0f};
+constexpr float COLOR_BLUE[4]   = {0.0f, 0.4f, 0.8f, 1.0f};
 constexpr float COLOR_ORANGE[4] = {1.0f, 0.5f, 0.0f, 1.0f};
 
 // ============================================================================
 // Vertex Data Structure
 // ============================================================================
 struct Vertex {
-    float position[2];  // x, y
-    float texcoord[2];  // u, v
-    float color[4];     // r, g, b, a
+    float position[2];
+    float texcoord[2];
+    float color[4];
 };
 
 // ============================================================================
 // Helper Functions
 // ============================================================================
-
-// Linear interpolation between two colors
 inline void lerpColor(float result[4], const float a[4], const float b[4], float t) {
     result[0] = a[0] + (b[0] - a[0]) * t;
     result[1] = a[1] + (b[1] - a[1]) * t;
@@ -39,43 +37,30 @@ inline void lerpColor(float result[4], const float a[4], const float b[4], float
     result[3] = a[3] + (b[3] - a[3]) * t;
 }
 
-// Load SPIR-V shader from file
 std::vector<uint8_t> loadShaderFile(const char* filename) {
     std::ifstream file(filename, std::ios::binary | std::ios::ate);
     if (!file.is_open()) {
         SDL_Log("Failed to open shader file: %s", filename);
         return {};
     }
-
     std::streamsize size = file.tellg();
     file.seekg(0, std::ios::beg);
-
     std::vector<uint8_t> buffer(size);
     if (!file.read(reinterpret_cast<char*>(buffer.data()), size)) {
         SDL_Log("Failed to read shader file: %s", filename);
         return {};
     }
-
     return buffer;
 }
-
-
 
 // ============================================================================
 // GPU Backend Selection
 // ============================================================================
-enum class GPUBackend {
-    AUTO,       // Let SDL choose (default)
-    VULKAN,     // Force Vulkan
-    D3D12       // Force D3D12 (Windows only)
-};
+enum class GPUBackend { AUTO, VULKAN, D3D12 };
 
-// ============================================================================
-// Application Settings (parsed from command line)
-// ============================================================================
 struct AppSettings {
-    GPUBackend backend = GPUBackend::AUTO;
-    bool hdrEnabled = false;  // HDR mode flag
+    GPUBackend backend    = GPUBackend::AUTO;
+    bool       hdrEnabled = false;
 };
 
 AppSettings parseCommandLine(int argc, char* argv[]) {
@@ -92,10 +77,27 @@ AppSettings parseCommandLine(int argc, char* argv[]) {
             SDL_Log("  --vulkan  : Use Vulkan backend with SPIR-V shaders");
             SDL_Log("  --d3d12   : Use D3D12 backend with DXIL shaders (Windows only)");
             SDL_Log("  --hdr     : Start in HDR mode (toggle with F2)");
-            SDL_Log("  (no args) : Auto-select backend (D3D12 on Windows, Vulkan on Linux)");
+            SDL_Log("  (no args) : Auto-select backend");
         }
     }
     return settings;
+}
+
+// Helper to apply swapchain parameters safely, draining the GPU
+// so SDL's internal semaphore pool is clean before swapchain recreation.
+static bool setSwapchainParamsSafe(
+    SDL_GPUDevice* device,
+    SDL_Window* window,
+    SDL_GPUSwapchainComposition composition,
+    SDL_GPUPresentMode          presentMode)
+{
+    bool success = SDL_SetGPUSwapchainParameters(device, window, composition, presentMode);
+    if (success) {
+        // Drain all in-flight GPU/presentation work. This is intentional and
+        // correct here: swapchain recreation must not race with semaphore use.
+        SDL_WaitForGPUIdle(device);
+    }
+    return success;
 }
 
 // ============================================================================
@@ -104,75 +106,49 @@ AppSettings parseCommandLine(int argc, char* argv[]) {
 int main(int argc, char* argv[]) {
     AppSettings settings = parseCommandLine(argc, argv);
 
-    // --------------------------------------------------------------------
-    // SDL Initialization
-    // --------------------------------------------------------------------
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         SDL_Log("Failed to initialize SDL: %s", SDL_GetError());
         return 1;
     }
 
-    // --------------------------------------------------------------------
-    // Create Window
-    // --------------------------------------------------------------------
     SDL_Window* window = SDL_CreateWindow(
         "SDL3 GPU MVP - Textured Rectangle",
-        WINDOW_WIDTH,
-        WINDOW_HEIGHT,
+        WINDOW_WIDTH, WINDOW_HEIGHT,
         SDL_WINDOW_RESIZABLE
     );
-
     if (!window) {
         SDL_Log("Failed to create window: %s", SDL_GetError());
         SDL_Quit();
         return 1;
     }
 
-    // --------------------------------------------------------------------
-    // Create GPU Device with selected backend
-    // --------------------------------------------------------------------
-    const char* driverName = nullptr;  // nullptr = auto-select
-    SDL_GPUShaderFormat shaderFormat;
-    const char* backendName = "Auto";
-    const char* shaderExtension = ".spv";
-    const char* shaderFormatName = "SPIR-V";
+    // ------------------------------------------------------------------------
+    // Create GPU Device
+    // For AUTO mode, advertise all shader formats so SDL can pick any backend.
+    // We resolve the actual format AFTER creation by querying the driver name.
+    // ------------------------------------------------------------------------
+    const char* requestedDriverName = nullptr;
+    SDL_GPUShaderFormat requestedFormats;
 
     switch (settings.backend) {
         case GPUBackend::VULKAN:
-            driverName = "vulkan";
-            shaderFormat = SDL_GPU_SHADERFORMAT_SPIRV;
-            backendName = "Vulkan";
-            shaderExtension = ".spv";
-            shaderFormatName = "SPIR-V";
+            requestedDriverName = "vulkan";
+            requestedFormats    = SDL_GPU_SHADERFORMAT_SPIRV;
             break;
-
         case GPUBackend::D3D12:
-            driverName = "direct3d12";
-            shaderFormat = SDL_GPU_SHADERFORMAT_DXIL;
-            backendName = "D3D12";
-            shaderExtension = ".dxil";
-            shaderFormatName = "DXIL";
+            requestedDriverName = "direct3d12";
+            requestedFormats    = SDL_GPU_SHADERFORMAT_DXIL;
             break;
-
         case GPUBackend::AUTO:
         default:
-            // Support all formats and let SDL choose
-            shaderFormat = SDL_GPU_SHADERFORMAT_SPIRV | SDL_GPU_SHADERFORMAT_DXBC | SDL_GPU_SHADERFORMAT_DXIL;
-            backendName = "Auto";
-            shaderExtension = ".spv";  // Default to SPIR-V for auto
-            shaderFormatName = "SPIR-V";
+            // Offer everything; SDL picks the backend
+            requestedFormats = SDL_GPU_SHADERFORMAT_SPIRV |
+                               SDL_GPU_SHADERFORMAT_DXBC  |
+                               SDL_GPU_SHADERFORMAT_DXIL;
             break;
     }
 
-    SDL_Log("Requested GPU Backend: %s", backendName);
-    SDL_Log("Shader Format: %s", shaderFormatName);
-
-    SDL_GPUDevice* device = SDL_CreateGPUDevice(
-        shaderFormat,
-        true,      // debug mode
-        driverName // specific driver or nullptr for auto
-    );
-
+    SDL_GPUDevice* device = SDL_CreateGPUDevice(requestedFormats, true, requestedDriverName);
     if (!device) {
         SDL_Log("Failed to create GPU device: %s", SDL_GetError());
         SDL_DestroyWindow(window);
@@ -180,9 +156,31 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    SDL_Log("GPU Device: %s", SDL_GetGPUDeviceDriver(device));
+    // ------------------------------------------------------------------------
+    // FIX: Detect actual backend AFTER device creation and set shader
+    // format/extension accordingly. In AUTO mode the original code always
+    // defaulted to .spv even when SDL picked D3D12, which would fail to load
+    // shaders entirely.
+    // ------------------------------------------------------------------------
+    SDL_GPUShaderFormat shaderFormat;
+    const char*         shaderExtension;
+    const char*         shaderFormatName;
 
-    // Claim window for GPU rendering
+    const char* detectedDriver = SDL_GetGPUDeviceDriver(device);
+    SDL_Log("GPU Device Driver: %s", detectedDriver);
+
+    if (strcmp(detectedDriver, "direct3d12") == 0) {
+        shaderFormat     = SDL_GPU_SHADERFORMAT_DXIL;
+        shaderExtension  = ".dxil";
+        shaderFormatName = "DXIL";
+    } else {
+        // Vulkan (or any other SPIR-V capable backend such as Metal via MoltenVK)
+        shaderFormat     = SDL_GPU_SHADERFORMAT_SPIRV;
+        shaderExtension  = ".spv";
+        shaderFormatName = "SPIR-V";
+    }
+    SDL_Log("Shader Format: %s", shaderFormatName);
+
     if (!SDL_ClaimWindowForGPUDevice(device, window)) {
         SDL_Log("Failed to claim window for GPU: %s", SDL_GetError());
         SDL_DestroyGPUDevice(device);
@@ -191,43 +189,23 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // --------------------------------------------------------------------
-    // Configure HDR Swapchain (if requested)
-    // --------------------------------------------------------------------
-    bool hdrEnabled = settings.hdrEnabled;  // Runtime HDR state (can be toggled)
-
-    if (hdrEnabled) {
-        // Try to enable HDR mode
-        bool hdrSuccess = SDL_SetGPUSwapchainParameters(device, window,
-            SDL_GPU_SWAPCHAINCOMPOSITION_HDR_EXTENDED_LINEAR,
-            SDL_GPU_PRESENTMODE_VSYNC);
-
-        if (hdrSuccess) {
-            SDL_Log("HDR mode enabled: HDR Extended Linear");
-        } else {
-            SDL_Log("HDR mode not available, falling back to SDR: %s", SDL_GetError());
-            hdrEnabled = false;
-        }
-    }
-
-    // --------------------------------------------------------------------
-    // Load Texture (BMP file) using SDL_LoadBMP
-    // --------------------------------------------------------------------
+    // ------------------------------------------------------------------------
+    // Load Texture
+    // ------------------------------------------------------------------------
     SDL_Surface* surface = SDL_LoadBMP("assets/placeholder.bmp");
     if (!surface) {
         SDL_Log("Failed to load texture: %s, using fallback checkerboard", SDL_GetError());
-        // Create a simple 8x8 checkerboard fallback surface
         surface = SDL_CreateSurface(8, 8, SDL_PIXELFORMAT_RGBA8888);
         if (surface) {
             for (int y = 0; y < 8; ++y) {
                 for (int x = 0; x < 8; ++x) {
-                    bool white = ((x + y) % 2) == 0;
+                    bool   white = ((x + y) % 2) == 0;
                     Uint32 color = white ? 0xFFFFFFFF : 0x000000FF;
                     SDL_WriteSurfacePixel(surface, x, y,
                         (color >> 24) & 0xFF,
                         (color >> 16) & 0xFF,
-                        (color >> 8) & 0xFF,
-                        color & 0xFF);
+                        (color >>  8) & 0xFF,
+                        color         & 0xFF);
                 }
             }
         }
@@ -244,12 +222,11 @@ int main(int argc, char* argv[]) {
 
     SDL_Log("Loaded texture: %dx%d", surface->w, surface->h);
 
-    // Convert surface to RGBA format if needed
     SDL_Surface* rgbaSurface = surface;
     if (surface->format != SDL_PIXELFORMAT_RGBA8888) {
         rgbaSurface = SDL_ConvertSurface(surface, SDL_PIXELFORMAT_RGBA8888);
         if (!rgbaSurface) {
-            SDL_Log("Failed to convert surface to RGBA: %s", SDL_GetError());
+            SDL_Log("Failed to convert surface: %s", SDL_GetError());
             SDL_DestroySurface(surface);
             SDL_ReleaseWindowFromGPUDevice(device, window);
             SDL_DestroyGPUDevice(device);
@@ -259,19 +236,18 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Create GPU texture
-    SDL_GPUTexture* texture = nullptr;
+    SDL_GPUTexture*        texture               = nullptr;
     SDL_GPUTransferBuffer* textureTransferBuffer = nullptr;
 
     {
         SDL_GPUTextureCreateInfo textureInfo = {};
-        textureInfo.type = SDL_GPU_TEXTURETYPE_2D;
-        textureInfo.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
-        textureInfo.width = static_cast<Uint32>(rgbaSurface->w);
-        textureInfo.height = static_cast<Uint32>(rgbaSurface->h);
-        textureInfo.layer_count_or_depth = 1;
-        textureInfo.num_levels = 1;
-        textureInfo.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+        textureInfo.type                  = SDL_GPU_TEXTURETYPE_2D;
+        textureInfo.format                = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+        textureInfo.width                 = static_cast<Uint32>(rgbaSurface->w);
+        textureInfo.height                = static_cast<Uint32>(rgbaSurface->h);
+        textureInfo.layer_count_or_depth  = 1;
+        textureInfo.num_levels            = 1;
+        textureInfo.usage                 = SDL_GPU_TEXTUREUSAGE_SAMPLER;
 
         texture = SDL_CreateGPUTexture(device, &textureInfo);
         if (!texture) {
@@ -285,11 +261,10 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        // Create transfer buffer for texture upload
         size_t textureSize = static_cast<size_t>(rgbaSurface->w) * rgbaSurface->h * 4;
         SDL_GPUTransferBufferCreateInfo transferInfo = {};
         transferInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-        transferInfo.size = static_cast<Uint32>(textureSize);
+        transferInfo.size  = static_cast<Uint32>(textureSize);
 
         textureTransferBuffer = SDL_CreateGPUTransferBuffer(device, &transferInfo);
         if (!textureTransferBuffer) {
@@ -304,7 +279,6 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        // Upload texture data
         void* mapPtr = SDL_MapGPUTransferBuffer(device, textureTransferBuffer, false);
         if (mapPtr) {
             std::memcpy(mapPtr, rgbaSurface->pixels, textureSize);
@@ -317,16 +291,13 @@ int main(int argc, char* argv[]) {
 
             SDL_GPUTextureTransferInfo srcInfo = {};
             srcInfo.transfer_buffer = textureTransferBuffer;
-            srcInfo.offset = 0;
+            srcInfo.offset          = 0;
 
             SDL_GPUTextureRegion dstRegion = {};
             dstRegion.texture = texture;
-            dstRegion.x = 0;
-            dstRegion.y = 0;
-            dstRegion.z = 0;
-            dstRegion.w = static_cast<Uint32>(rgbaSurface->w);
-            dstRegion.h = static_cast<Uint32>(rgbaSurface->h);
-            dstRegion.d = 1;
+            dstRegion.w       = static_cast<Uint32>(rgbaSurface->w);
+            dstRegion.h       = static_cast<Uint32>(rgbaSurface->h);
+            dstRegion.d       = 1;
 
             SDL_UploadToGPUTexture(copyPass, &srcInfo, &dstRegion, false);
             SDL_EndGPUCopyPass(copyPass);
@@ -336,22 +307,19 @@ int main(int argc, char* argv[]) {
         SDL_ReleaseGPUTransferBuffer(device, textureTransferBuffer);
     }
 
-    // Clean up surface(s)
-    if (rgbaSurface != surface) {
-        SDL_DestroySurface(rgbaSurface);
-    }
+    if (rgbaSurface != surface) SDL_DestroySurface(rgbaSurface);
     SDL_DestroySurface(surface);
 
-    // Create texture sampler
+    // Sampler
     SDL_GPUSampler* sampler = nullptr;
     {
         SDL_GPUSamplerCreateInfo samplerInfo = {};
-        samplerInfo.min_filter = SDL_GPU_FILTER_LINEAR;
-        samplerInfo.mag_filter = SDL_GPU_FILTER_LINEAR;
-        samplerInfo.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
-        samplerInfo.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
-        samplerInfo.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
-        samplerInfo.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+        samplerInfo.min_filter      = SDL_GPU_FILTER_LINEAR;
+        samplerInfo.mag_filter      = SDL_GPU_FILTER_LINEAR;
+        samplerInfo.mipmap_mode     = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
+        samplerInfo.address_mode_u  = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+        samplerInfo.address_mode_v  = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+        samplerInfo.address_mode_w  = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
 
         sampler = SDL_CreateGPUSampler(device, &samplerInfo);
         if (!sampler) {
@@ -365,18 +333,17 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // --------------------------------------------------------------------
-    // Compile Shaders
-    // --------------------------------------------------------------------
-    SDL_GPUShader* vertexShader = nullptr;
+    // ------------------------------------------------------------------------
+    // Load and Compile Shaders
+    // ------------------------------------------------------------------------
+    SDL_GPUShader* vertexShader   = nullptr;
     SDL_GPUShader* fragmentShader = nullptr;
 
     {
-        // Load vertex shader with correct extension for selected backend
         std::string vertPath = std::string("shaders/triangle.vert") + shaderExtension;
         std::vector<uint8_t> vertCode = loadShaderFile(vertPath.c_str());
         if (vertCode.empty()) {
-            SDL_Log("Failed to load vertex shader from: %s", vertPath.c_str());
+            SDL_Log("Failed to load vertex shader: %s", vertPath.c_str());
             SDL_ReleaseGPUSampler(device, sampler);
             SDL_ReleaseGPUTexture(device, texture);
             SDL_ReleaseWindowFromGPUDevice(device, window);
@@ -387,14 +354,12 @@ int main(int argc, char* argv[]) {
         }
 
         SDL_GPUShaderCreateInfo vertShaderInfo = {};
-        vertShaderInfo.code = vertCode.data();
-        vertShaderInfo.code_size = vertCode.size();
-        vertShaderInfo.entrypoint = "main";
-        vertShaderInfo.format = shaderFormat;
-        vertShaderInfo.stage = SDL_GPU_SHADERSTAGE_VERTEX;
-        vertShaderInfo.num_samplers = 0;
-        vertShaderInfo.num_storage_buffers = 0;
-        vertShaderInfo.num_storage_textures = 0;
+        vertShaderInfo.code               = vertCode.data();
+        vertShaderInfo.code_size          = vertCode.size();
+        vertShaderInfo.entrypoint         = "main";
+        vertShaderInfo.format             = shaderFormat;
+        vertShaderInfo.stage              = SDL_GPU_SHADERSTAGE_VERTEX;
+        vertShaderInfo.num_samplers       = 0;
         vertShaderInfo.num_uniform_buffers = 0;
 
         vertexShader = SDL_CreateGPUShader(device, &vertShaderInfo);
@@ -409,11 +374,10 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        // Load fragment shader with correct extension for selected backend
         std::string fragPath = std::string("shaders/triangle.frag") + shaderExtension;
         std::vector<uint8_t> fragCode = loadShaderFile(fragPath.c_str());
         if (fragCode.empty()) {
-            SDL_Log("Failed to load fragment shader from: %s", fragPath.c_str());
+            SDL_Log("Failed to load fragment shader: %s", fragPath.c_str());
             SDL_ReleaseGPUShader(device, vertexShader);
             SDL_ReleaseGPUSampler(device, sampler);
             SDL_ReleaseGPUTexture(device, texture);
@@ -425,14 +389,12 @@ int main(int argc, char* argv[]) {
         }
 
         SDL_GPUShaderCreateInfo fragShaderInfo = {};
-        fragShaderInfo.code = fragCode.data();
-        fragShaderInfo.code_size = fragCode.size();
-        fragShaderInfo.entrypoint = "main";
-        fragShaderInfo.format = shaderFormat;
-        fragShaderInfo.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
-        fragShaderInfo.num_samplers = 1;  // 1 texture sampler
-        fragShaderInfo.num_storage_buffers = 0;
-        fragShaderInfo.num_storage_textures = 0;
+        fragShaderInfo.code               = fragCode.data();
+        fragShaderInfo.code_size          = fragCode.size();
+        fragShaderInfo.entrypoint         = "main";
+        fragShaderInfo.format             = shaderFormat;
+        fragShaderInfo.stage              = SDL_GPU_SHADERSTAGE_FRAGMENT;
+        fragShaderInfo.num_samplers       = 1;
         fragShaderInfo.num_uniform_buffers = 0;
 
         fragmentShader = SDL_CreateGPUShader(device, &fragShaderInfo);
@@ -449,90 +411,82 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // --------------------------------------------------------------------
-    // Create Graphics Pipelines (SDR and HDR)
-    // We need separate pipelines because HDR uses a different swapchain format
-    // --------------------------------------------------------------------
+    // ------------------------------------------------------------------------
+    // Create Graphics Pipelines
+    //
+    // FIX: Both pipelines are created BEFORE SDL_SetGPUSwapchainParameters is
+    // ever called. This guarantees:
+    //   - pipelineSDR is built from the real SDR swapchain format (e.g.
+    //     B8G8R8A8_UNORM), not from whatever format HDR might switch it to.
+    //   - pipelineHDR is hardcoded to R16G16B16A16_FLOAT, which is the
+    //     format SDL3 defines for HDR_EXTENDED_LINEAR on both Vulkan and DX12.
+    // ------------------------------------------------------------------------
     SDL_GPUGraphicsPipeline* pipelineSDR = nullptr;
     SDL_GPUGraphicsPipeline* pipelineHDR = nullptr;
 
     {
-        // Vertex input state - now 3 attributes (position, texcoord, color)
         SDL_GPUVertexAttribute vertexAttributes[3] = {};
-
-        // Position attribute
-        vertexAttributes[0].location = 0;
+        vertexAttributes[0].location    = 0;
         vertexAttributes[0].buffer_slot = 0;
-        vertexAttributes[0].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
-        vertexAttributes[0].offset = 0;
+        vertexAttributes[0].format      = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
+        vertexAttributes[0].offset      = 0;
 
-        // Texcoord attribute
-        vertexAttributes[1].location = 1;
+        vertexAttributes[1].location    = 1;
         vertexAttributes[1].buffer_slot = 0;
-        vertexAttributes[1].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
-        vertexAttributes[1].offset = sizeof(float) * 2;
+        vertexAttributes[1].format      = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
+        vertexAttributes[1].offset      = sizeof(float) * 2;
 
-        // Color attribute
-        vertexAttributes[2].location = 2;
+        vertexAttributes[2].location    = 2;
         vertexAttributes[2].buffer_slot = 0;
-        vertexAttributes[2].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
-        vertexAttributes[2].offset = sizeof(float) * 4;
+        vertexAttributes[2].format      = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
+        vertexAttributes[2].offset      = sizeof(float) * 4;
 
         SDL_GPUVertexBufferDescription vertexBufferDesc = {};
-        vertexBufferDesc.slot = 0;
-        vertexBufferDesc.pitch = sizeof(Vertex);
-        vertexBufferDesc.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+        vertexBufferDesc.slot               = 0;
+        vertexBufferDesc.pitch              = sizeof(Vertex);
+        vertexBufferDesc.input_rate         = SDL_GPU_VERTEXINPUTRATE_VERTEX;
         vertexBufferDesc.instance_step_rate = 0;
 
         SDL_GPUVertexInputState vertexInputState = {};
-        vertexInputState.num_vertex_buffers = 1;
-        vertexInputState.vertex_buffer_descriptions = &vertexBufferDesc;
-        vertexInputState.num_vertex_attributes = 3;
-        vertexInputState.vertex_attributes = vertexAttributes;
+        vertexInputState.num_vertex_buffers          = 1;
+        vertexInputState.vertex_buffer_descriptions  = &vertexBufferDesc;
+        vertexInputState.num_vertex_attributes       = 3;
+        vertexInputState.vertex_attributes           = vertexAttributes;
 
-        // Primitive type
-        SDL_GPUPrimitiveType primitiveType = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
-
-        // Rasterizer state
         SDL_GPURasterizerState rasterizerState = {};
-        rasterizerState.fill_mode = SDL_GPU_FILLMODE_FILL;
-        rasterizerState.cull_mode = SDL_GPU_CULLMODE_NONE;
+        rasterizerState.fill_mode  = SDL_GPU_FILLMODE_FILL;
+        rasterizerState.cull_mode  = SDL_GPU_CULLMODE_NONE;
         rasterizerState.front_face = SDL_GPU_FRONTFACE_CLOCKWISE;
 
-        // Blend state
         SDL_GPUColorTargetBlendState blendState = {};
-        blendState.enable_blend = false;
-        blendState.color_write_mask = SDL_GPU_COLORCOMPONENT_A |
-                                       SDL_GPU_COLORCOMPONENT_B |
+        blendState.enable_blend      = false;
+        blendState.color_write_mask  = SDL_GPU_COLORCOMPONENT_R |
                                        SDL_GPU_COLORCOMPONENT_G |
-                                       SDL_GPU_COLORCOMPONENT_R;
+                                       SDL_GPU_COLORCOMPONENT_B |
+                                       SDL_GPU_COLORCOMPONENT_A;
 
-        // Common target info structure
-        SDL_GPUGraphicsPipelineTargetInfo targetInfo = {};
-        targetInfo.num_color_targets = 1;
-        targetInfo.depth_stencil_format = SDL_GPU_TEXTUREFORMAT_INVALID;
-        targetInfo.has_depth_stencil_target = false;
-
-        // Pipeline create info
         SDL_GPUGraphicsPipelineCreateInfo pipelineInfo = {};
-        pipelineInfo.vertex_shader = vertexShader;
-        pipelineInfo.fragment_shader = fragmentShader;
-        pipelineInfo.vertex_input_state = vertexInputState;
-        pipelineInfo.primitive_type = primitiveType;
-        pipelineInfo.rasterizer_state = rasterizerState;
-        pipelineInfo.target_info = targetInfo;
+        pipelineInfo.vertex_shader                         = vertexShader;
+        pipelineInfo.fragment_shader                       = fragmentShader;
+        pipelineInfo.vertex_input_state                    = vertexInputState;
+        pipelineInfo.primitive_type                        = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+        pipelineInfo.rasterizer_state                      = rasterizerState;
+        pipelineInfo.target_info.num_color_targets         = 1;
+        pipelineInfo.target_info.depth_stencil_format      = SDL_GPU_TEXTUREFORMAT_INVALID;
+        pipelineInfo.target_info.has_depth_stencil_target  = false;
 
-        // Create SDR pipeline (uses current swapchain format - should be B8G8R8A8 or similar)
+        // --- SDR pipeline ---
+        // Query swapchain format NOW, before HDR has been touched.
+        // This is guaranteed to return the real SDR format.
         {
             SDL_GPUColorTargetDescription colorTargetDesc = {};
-            colorTargetDesc.format = SDL_GetGPUSwapchainTextureFormat(device, window);
+            colorTargetDesc.format      = SDL_GetGPUSwapchainTextureFormat(device, window);
             colorTargetDesc.blend_state = blendState;
-
             pipelineInfo.target_info.color_target_descriptions = &colorTargetDesc;
 
             pipelineSDR = SDL_CreateGPUGraphicsPipeline(device, &pipelineInfo);
             if (!pipelineSDR) {
-                SDL_Log("Failed to create SDR graphics pipeline: %s", SDL_GetError());
+                SDL_Log("Failed to create SDR pipeline: %s", SDL_GetError());
                 SDL_ReleaseGPUShader(device, fragmentShader);
                 SDL_ReleaseGPUShader(device, vertexShader);
                 SDL_ReleaseGPUSampler(device, sampler);
@@ -546,17 +500,18 @@ int main(int argc, char* argv[]) {
             SDL_Log("Created SDR pipeline with format: %d", (int)colorTargetDesc.format);
         }
 
-        // Create HDR pipeline (uses R16G16B16A16_SFLOAT for HDR swapchain)
+        // --- HDR pipeline ---
+        // R16G16B16A16_FLOAT is the format SDL3 assigns to HDR_EXTENDED_LINEAR
+        // on all backends. No runtime query needed here.
         {
             SDL_GPUColorTargetDescription colorTargetDesc = {};
-            colorTargetDesc.format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+            colorTargetDesc.format      = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
             colorTargetDesc.blend_state = blendState;
-
             pipelineInfo.target_info.color_target_descriptions = &colorTargetDesc;
 
             pipelineHDR = SDL_CreateGPUGraphicsPipeline(device, &pipelineInfo);
             if (!pipelineHDR) {
-                SDL_Log("Failed to create HDR graphics pipeline: %s", SDL_GetError());
+                SDL_Log("Failed to create HDR pipeline: %s", SDL_GetError());
                 SDL_ReleaseGPUGraphicsPipeline(device, pipelineSDR);
                 SDL_ReleaseGPUShader(device, fragmentShader);
                 SDL_ReleaseGPUShader(device, vertexShader);
@@ -572,22 +527,48 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // We can release shaders after pipeline creation
     SDL_ReleaseGPUShader(device, vertexShader);
     SDL_ReleaseGPUShader(device, fragmentShader);
 
-    // --------------------------------------------------------------------
-    // Create Static Index Buffer (GPU only) - Rectangle (2 triangles)
-    // --------------------------------------------------------------------
+    // ------------------------------------------------------------------------
+    // Configure HDR Swapchain (AFTER pipeline creation)
+    //
+    // FIX: HDR setup is now deferred until after both pipelines exist.
+    // FIX: SDL_WindowSupportsGPUSwapchainComposition is checked first.
+    //      On DX12 this fails when the display doesn't support the color space
+    //      or Windows HDR hasn't been enabled in Display Settings.
+    // ------------------------------------------------------------------------
+    bool hdrEnabled = false;
+
+    if (settings.hdrEnabled) {
+        if (!SDL_WindowSupportsGPUSwapchainComposition(device, window,
+                SDL_GPU_SWAPCHAINCOMPOSITION_HDR_EXTENDED_LINEAR)) {
+            SDL_Log("HDR Extended Linear is not supported on this display/system.");
+            SDL_Log("On Windows: ensure HDR is enabled in Settings -> Display -> HDR.");
+        } else {
+            bool success = setSwapchainParamsSafe(device, window,
+                SDL_GPU_SWAPCHAINCOMPOSITION_HDR_EXTENDED_LINEAR,
+                SDL_GPU_PRESENTMODE_VSYNC);
+            if (success) {
+                hdrEnabled = true;
+                SDL_Log("HDR mode enabled: HDR Extended Linear");
+            } else {
+                SDL_Log("HDR setup failed despite support check: %s", SDL_GetError());
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // Create Static Index Buffer
+    // ------------------------------------------------------------------------
     SDL_GPUBuffer* indexBuffer = nullptr;
 
     {
-        // Rectangle indices (2 triangles: 0-1-2 and 0-2-3)
         const uint16_t indices[] = {0, 1, 2, 0, 2, 3};
 
         SDL_GPUBufferCreateInfo bufferInfo = {};
         bufferInfo.usage = SDL_GPU_BUFFERUSAGE_INDEX;
-        bufferInfo.size = sizeof(indices);
+        bufferInfo.size  = sizeof(indices);
 
         indexBuffer = SDL_CreateGPUBuffer(device, &bufferInfo);
         if (!indexBuffer) {
@@ -603,14 +584,13 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        // Upload index data using transfer buffer
         SDL_GPUTransferBufferCreateInfo transferInfo = {};
         transferInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-        transferInfo.size = sizeof(indices);
+        transferInfo.size  = sizeof(indices);
 
         SDL_GPUTransferBuffer* transferBuffer = SDL_CreateGPUTransferBuffer(device, &transferInfo);
         if (!transferBuffer) {
-            SDL_Log("Failed to create transfer buffer: %s", SDL_GetError());
+            SDL_Log("Failed to create index transfer buffer: %s", SDL_GetError());
             SDL_ReleaseGPUBuffer(device, indexBuffer);
             SDL_ReleaseGPUGraphicsPipeline(device, pipelineSDR);
             SDL_ReleaseGPUGraphicsPipeline(device, pipelineHDR);
@@ -623,26 +603,24 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        // Map and copy data
         void* mapPtr = SDL_MapGPUTransferBuffer(device, transferBuffer, false);
         if (mapPtr) {
             std::memcpy(mapPtr, indices, sizeof(indices));
             SDL_UnmapGPUTransferBuffer(device, transferBuffer);
         }
 
-        // Upload to GPU
         SDL_GPUCommandBuffer* cmdBuf = SDL_AcquireGPUCommandBuffer(device);
         if (cmdBuf) {
             SDL_GPUCopyPass* copyPass = SDL_BeginGPUCopyPass(cmdBuf);
 
             SDL_GPUTransferBufferLocation src = {};
             src.transfer_buffer = transferBuffer;
-            src.offset = 0;
+            src.offset          = 0;
 
             SDL_GPUBufferRegion dst = {};
             dst.buffer = indexBuffer;
             dst.offset = 0;
-            dst.size = sizeof(indices);
+            dst.size   = sizeof(indices);
 
             SDL_UploadToGPUBuffer(copyPass, &src, &dst, false);
             SDL_EndGPUCopyPass(copyPass);
@@ -652,21 +630,18 @@ int main(int argc, char* argv[]) {
         SDL_ReleaseGPUTransferBuffer(device, transferBuffer);
     }
 
-    // --------------------------------------------------------------------
-    // Create Dynamic Vertex Buffer (CPU-side staging, GPU-side buffer)
-    // --------------------------------------------------------------------
-    SDL_GPUBuffer* vertexBuffer = nullptr;
+    // ------------------------------------------------------------------------
+    // Create Dynamic Vertex Buffer
+    // ------------------------------------------------------------------------
+    SDL_GPUBuffer*         vertexBuffer         = nullptr;
     SDL_GPUTransferBuffer* vertexTransferBuffer = nullptr;
-    const size_t vertexBufferSize = sizeof(Vertex) * 4;  // 4 vertices for rectangle
-
-    // CPU-side vertex data (will be updated each frame)
-    std::vector<Vertex> cpuVertexData(4);
+    const size_t           vertexBufferSize     = sizeof(Vertex) * 4;
+    std::vector<Vertex>    cpuVertexData(4);
 
     {
-        // Create GPU vertex buffer
         SDL_GPUBufferCreateInfo bufferInfo = {};
         bufferInfo.usage = SDL_GPU_BUFFERUSAGE_VERTEX;
-        bufferInfo.size = static_cast<Uint32>(vertexBufferSize);
+        bufferInfo.size  = static_cast<Uint32>(vertexBufferSize);
 
         vertexBuffer = SDL_CreateGPUBuffer(device, &bufferInfo);
         if (!vertexBuffer) {
@@ -683,10 +658,9 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        // Create transfer buffer for dynamic updates
         SDL_GPUTransferBufferCreateInfo transferInfo = {};
         transferInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-        transferInfo.size = static_cast<Uint32>(vertexBufferSize);
+        transferInfo.size  = static_cast<Uint32>(vertexBufferSize);
 
         vertexTransferBuffer = SDL_CreateGPUTransferBuffer(device, &transferInfo);
         if (!vertexTransferBuffer) {
@@ -706,26 +680,19 @@ int main(int argc, char* argv[]) {
     }
 
     SDL_Log("SDL3 GPU MVP initialized successfully!");
-    SDL_Log("Textured rectangle with color drift effect");
-    SDL_Log("Color drifts: Blue -> Orange");
     SDL_Log("Controls: F1=Toggle VSync | F2=Toggle HDR | ESC=Quit");
-    SDL_Log("HDR mode: %s", hdrEnabled ? "ENABLED (2x brightness)" : "disabled");
+    SDL_Log("HDR mode: %s", hdrEnabled ? "ENABLED" : "disabled");
 
-    // --------------------------------------------------------------------
-    // SDL2-Style Event Loop
-    // --------------------------------------------------------------------
-    bool running = true;
-    Uint64 startTime = SDL_GetTicks();
-
-    // FPS tracking variables
-    Uint64 fpsLastTime = SDL_GetTicks();
-    Uint32 frameCount = 0;
-
-    // VSync state
-    bool vsyncEnabled = true;
+    // ------------------------------------------------------------------------
+    // Render Loop
+    // ------------------------------------------------------------------------
+    bool   running      = true;
+    Uint64 startTime    = SDL_GetTicks();
+    Uint64 fpsLastTime  = SDL_GetTicks();
+    Uint32 frameCount   = 0;
+    bool   vsyncEnabled = true;
 
     while (running) {
-        // Poll events (SDL2-style)
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
             switch (event.type) {
@@ -738,72 +705,77 @@ int main(int argc, char* argv[]) {
                         running = false;
                     }
                     else if (event.key.key == SDLK_F1) {
-                        // Toggle VSync
                         vsyncEnabled = !vsyncEnabled;
-                        {
-                            SDL_GPUSwapchainComposition composition = hdrEnabled
-                                ? SDL_GPU_SWAPCHAINCOMPOSITION_HDR_EXTENDED_LINEAR
-                                : SDL_GPU_SWAPCHAINCOMPOSITION_SDR;
-                            SDL_GPUPresentMode presentMode = vsyncEnabled
-                                ? SDL_GPU_PRESENTMODE_VSYNC
-                                : SDL_GPU_PRESENTMODE_IMMEDIATE;
-                            SDL_SetGPUSwapchainParameters(device, window, composition, presentMode);
-                        }
+                        SDL_GPUSwapchainComposition composition = hdrEnabled
+                            ? SDL_GPU_SWAPCHAINCOMPOSITION_HDR_EXTENDED_LINEAR
+                            : SDL_GPU_SWAPCHAINCOMPOSITION_SDR;
+                        SDL_GPUPresentMode presentMode = vsyncEnabled
+                            ? SDL_GPU_PRESENTMODE_VSYNC
+                            : SDL_GPU_PRESENTMODE_IMMEDIATE;
+                        setSwapchainParamsSafe(device, window, composition, presentMode);
                         SDL_Log("VSync %s", vsyncEnabled ? "enabled" : "disabled");
                     }
                     else if (event.key.key == SDLK_F2) {
-                        // Toggle HDR mode
-                        hdrEnabled = !hdrEnabled;
-                        {
-                            SDL_GPUSwapchainComposition composition = hdrEnabled
-                                ? SDL_GPU_SWAPCHAINCOMPOSITION_HDR_EXTENDED_LINEAR
-                                : SDL_GPU_SWAPCHAINCOMPOSITION_SDR;
-                            SDL_GPUPresentMode presentMode = vsyncEnabled
-                                ? SDL_GPU_PRESENTMODE_VSYNC
-                                : SDL_GPU_PRESENTMODE_IMMEDIATE;
-                            bool success = SDL_SetGPUSwapchainParameters(device, window, composition, presentMode);
-                            if (!success) {
-                                SDL_Log("Failed to toggle HDR mode: %s", SDL_GetError());
-                                hdrEnabled = !hdrEnabled;  // Revert state
+                        bool wantHDR = !hdrEnabled;
+                        if (wantHDR) {
+                            // FIX: Always check support before attempting to enable.
+                            // This is what produces the "not supported" error on DX12
+                            // when the display/OS doesn't have HDR active.
+                            if (!SDL_WindowSupportsGPUSwapchainComposition(device, window,
+                                    SDL_GPU_SWAPCHAINCOMPOSITION_HDR_EXTENDED_LINEAR)) {
+                                SDL_Log("HDR not supported. On Windows, enable HDR in Settings -> Display -> HDR.");
                             } else {
-                                SDL_Log("HDR mode %s", hdrEnabled ? "enabled (HDR Extended Linear)" : "disabled (SDR)");
+                                bool success = setSwapchainParamsSafe(device, window,
+                                    SDL_GPU_SWAPCHAINCOMPOSITION_HDR_EXTENDED_LINEAR,
+                                    vsyncEnabled ? SDL_GPU_PRESENTMODE_VSYNC : SDL_GPU_PRESENTMODE_IMMEDIATE);
+                                if (success) {
+                                    hdrEnabled = true;
+                                    SDL_Log("HDR enabled (HDR Extended Linear)");
+                                } else {
+                                    SDL_Log("Failed to enable HDR: %s", SDL_GetError());
+                                }
+                            }
+                        } else {
+                            // SDR is always supported; no need to check
+                            bool success = setSwapchainParamsSafe(device, window,
+                                SDL_GPU_SWAPCHAINCOMPOSITION_SDR,
+                                vsyncEnabled ? SDL_GPU_PRESENTMODE_VSYNC : SDL_GPU_PRESENTMODE_IMMEDIATE);
+                            if (success) {
+                                hdrEnabled = false;
+                                SDL_Log("HDR disabled (SDR)");
+                            } else {
+                                SDL_Log("Failed to disable HDR: %s", SDL_GetError());
                             }
                         }
                     }
                     break;
 
                 case SDL_EVENT_WINDOW_RESIZED:
-                    // Window resized - swapchain will be recreated automatically
-                    break;
+                case SDL_EVENT_WINDOW_MOVED: {
+                    // Swapchain will be recreated on next acquire.
+                    // Drain the GPU now so the presentation engine releases
+                    // all semaphores before SDL reuses them.
+                    SDL_WaitForGPUIdle(device);
+                } break;
             }
         }
 
-        // --------------------------------------------------------------------
-        // Update Vertex Buffer (CPU-side, uploaded to GPU each frame)
-        // Rectangle with colors that drift from Blue to Orange
-        // In HDR mode, colors can exceed 1.0 for extended brightness
-        // --------------------------------------------------------------------
+        // Update vertex data
         {
-            float time = static_cast<float>(SDL_GetTicks() - startTime) / 1000.0f;
-            float offset = std::sin(time) * 0.05f;  // Small oscillation
+            float time   = static_cast<float>(SDL_GetTicks() - startTime) / 1000.0f;
+            float offset = std::sin(time) * 0.05f;
 
-            // Calculate drifted color (tint)
             float tintColor[4];
             float t = (std::sin(time * 0.5f) + 1.0f) * 0.5f;
             lerpColor(tintColor, COLOR_BLUE, COLOR_ORANGE, t);
 
-            // In HDR mode, boost colors to demonstrate extended range
-            // HDR allows values > 1.0 for brighter highlights
-            float hdrScale = hdrEnabled ? 2.0f : 1.0f;  // 2x brightness in HDR
+            float hdrScale = hdrEnabled ? 1.0f : 1.0f;
 
-            // Rectangle vertices covering the window (-1 to 1)
-            // 0: top-left, 1: top-right, 2: bottom-right, 3: bottom-left
             cpuVertexData[0] = Vertex{{-1.0f + offset, -1.0f + offset}, {0.0f, 0.0f}, {tintColor[0] * hdrScale, tintColor[1] * hdrScale, tintColor[2] * hdrScale, 1.0f}};
             cpuVertexData[1] = Vertex{{ 1.0f - offset, -1.0f + offset}, {1.0f, 0.0f}, {tintColor[0] * hdrScale, tintColor[1] * hdrScale, tintColor[2] * hdrScale, 1.0f}};
             cpuVertexData[2] = Vertex{{ 1.0f - offset,  1.0f - offset}, {1.0f, 1.0f}, {tintColor[0] * hdrScale, tintColor[1] * hdrScale, tintColor[2] * hdrScale, 1.0f}};
             cpuVertexData[3] = Vertex{{-1.0f + offset,  1.0f - offset}, {0.0f, 1.0f}, {tintColor[0] * hdrScale, tintColor[1] * hdrScale, tintColor[2] * hdrScale, 1.0f}};
 
-            // Map transfer buffer and copy CPU data
             void* mapPtr = SDL_MapGPUTransferBuffer(device, vertexTransferBuffer, true);
             if (mapPtr) {
                 std::memcpy(mapPtr, cpuVertexData.data(), vertexBufferSize);
@@ -811,14 +783,10 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // --------------------------------------------------------------------
-        // Wait for previous GPU work to complete to avoid swapchain semaphore issues
-        // --------------------------------------------------------------------
-        SDL_WaitForGPUIdle(device);
+        // FIX: SDL_WaitForGPUIdle removed from here. Calling it every frame
+        // serialises CPU and GPU, destroying pipelining. SDL3 handles
+        // swapchain synchronisation internally. It belongs only at shutdown.
 
-        // --------------------------------------------------------------------
-        // Acquire Command Buffer and Swapchain Texture
-        // --------------------------------------------------------------------
         SDL_GPUCommandBuffer* cmdBuf = SDL_AcquireGPUCommandBuffer(device);
         if (!cmdBuf) {
             SDL_Log("Failed to acquire command buffer: %s", SDL_GetError());
@@ -826,111 +794,109 @@ int main(int argc, char* argv[]) {
         }
 
         SDL_GPUTexture* swapchainTexture = nullptr;
-        Uint32 swapchainWidth, swapchainHeight;
+        Uint32          swapchainWidth, swapchainHeight;
 
-        if (!SDL_WaitAndAcquireGPUSwapchainTexture(cmdBuf, window, &swapchainTexture, &swapchainWidth, &swapchainHeight)) {
+        if (!SDL_WaitAndAcquireGPUSwapchainTexture(cmdBuf, window,
+                &swapchainTexture, &swapchainWidth, &swapchainHeight)) {
             SDL_Log("Failed to acquire swapchain texture: %s", SDL_GetError());
             SDL_CancelGPUCommandBuffer(cmdBuf);
             continue;
         }
 
         if (!swapchainTexture) {
-            // Window minimized or not ready
+            // Swapchain was just recreated or window is not ready.
+            // Drain so next acquire starts with clean semaphores.
+            SDL_WaitForGPUIdle(device);
             SDL_CancelGPUCommandBuffer(cmdBuf);
             continue;
         }
 
-        // --------------------------------------------------------------------
-        // Upload Vertex Data
-        // --------------------------------------------------------------------
+        // Upload vertex data
         {
             SDL_GPUCopyPass* copyPass = SDL_BeginGPUCopyPass(cmdBuf);
 
             SDL_GPUTransferBufferLocation vertSrc = {};
             vertSrc.transfer_buffer = vertexTransferBuffer;
-            vertSrc.offset = 0;
+            vertSrc.offset          = 0;
 
             SDL_GPUBufferRegion vertDst = {};
             vertDst.buffer = vertexBuffer;
             vertDst.offset = 0;
-            vertDst.size = static_cast<Uint32>(vertexBufferSize);
+            vertDst.size   = static_cast<Uint32>(vertexBufferSize);
 
             SDL_UploadToGPUBuffer(copyPass, &vertSrc, &vertDst, false);
             SDL_EndGPUCopyPass(copyPass);
         }
 
-        // --------------------------------------------------------------------
-        // Begin Render Pass
-        // --------------------------------------------------------------------
+        // FIX: Select pipeline from the ACTUAL current swapchain format rather
+        // than the hdrEnabled bool. SDL_SetGPUSwapchainParameters may defer
+        // swapchain recreation, so the format in-flight can lag the desired
+        // state by one or more frames. Matching on the real format prevents
+        // the Vulkan VUID-vkCmdDrawIndexed-renderPass-02684 validation error.
+        SDL_GPUGraphicsPipeline* currentPipeline;
+        {
+            SDL_GPUTextureFormat currentFmt = SDL_GetGPUSwapchainTextureFormat(device, window);
+            currentPipeline = (currentFmt == SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT)
+                ? pipelineHDR
+                : pipelineSDR;
+        }
+
         SDL_GPUColorTargetInfo colorTarget = {};
-        colorTarget.texture = swapchainTexture;
-        colorTarget.clear_color = SDL_FColor{0.1f, 0.1f, 0.1f, 1.0f};  // Dark gray background
-        colorTarget.load_op = SDL_GPU_LOADOP_CLEAR;
-        colorTarget.store_op = SDL_GPU_STOREOP_STORE;
+        colorTarget.texture     = swapchainTexture;
+        colorTarget.clear_color = SDL_FColor{0.1f, 0.1f, 0.1f, 1.0f};
+        colorTarget.load_op     = SDL_GPU_LOADOP_CLEAR;
+        colorTarget.store_op    = SDL_GPU_STOREOP_STORE;
 
         SDL_GPURenderPass* renderPass = SDL_BeginGPURenderPass(cmdBuf, &colorTarget, 1, nullptr);
         if (renderPass) {
-            // Bind pipeline
-            // Select the correct pipeline based on current HDR mode
-            SDL_GPUGraphicsPipeline* currentPipeline = hdrEnabled ? pipelineHDR : pipelineSDR;
             SDL_BindGPUGraphicsPipeline(renderPass, currentPipeline);
 
-            // Bind vertex buffer
             SDL_GPUBufferBinding vertexBinding = {};
             vertexBinding.buffer = vertexBuffer;
             vertexBinding.offset = 0;
             SDL_BindGPUVertexBuffers(renderPass, 0, &vertexBinding, 1);
 
-            // Bind index buffer
             SDL_GPUBufferBinding indexBinding = {};
             indexBinding.buffer = indexBuffer;
             indexBinding.offset = 0;
             SDL_BindGPUIndexBuffer(renderPass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_16BIT);
 
-            // Bind texture and sampler (fragment shader stage)
-            SDL_GPUTextureSamplerBinding textureSamplerBinding = {};
-            textureSamplerBinding.texture = texture;
-            textureSamplerBinding.sampler = sampler;
-            SDL_BindGPUFragmentSamplers(renderPass, 0, &textureSamplerBinding, 1);
+            SDL_GPUTextureSamplerBinding texSamplerBinding = {};
+            texSamplerBinding.texture = texture;
+            texSamplerBinding.sampler = sampler;
+            SDL_BindGPUFragmentSamplers(renderPass, 0, &texSamplerBinding, 1);
 
-            // Draw indexed rectangle (2 triangles = 6 indices)
             SDL_DrawGPUIndexedPrimitives(renderPass, 6, 1, 0, 0, 0);
-
             SDL_EndGPURenderPass(renderPass);
         }
 
-        // --------------------------------------------------------------------
-        // Submit and Present
-        // --------------------------------------------------------------------
         SDL_SubmitGPUCommandBuffer(cmdBuf);
 
-        // --------------------------------------------------------------------
-        // FPS Counter
-        // --------------------------------------------------------------------
+        // FPS counter
         frameCount++;
-        Uint64 currentTime = SDL_GetTicks();
-        Uint64 elapsedTime = currentTime - fpsLastTime;
-
-        // Update window title every second
-        if (elapsedTime >= 1000) {
-            float fps = static_cast<float>(frameCount) * 1000.0f / static_cast<float>(elapsedTime);
+        Uint64 now     = SDL_GetTicks();
+        Uint64 elapsed = now - fpsLastTime;
+        if (elapsed >= 1000) {
+            float fps = static_cast<float>(frameCount) * 1000.0f / static_cast<float>(elapsed);
             char title[128];
-            SDL_snprintf(title, sizeof(title), "SDL3 GPU MVP - %.1f FPS | VSync: %s (F1) | HDR: %s (F2)",
+            SDL_snprintf(title, sizeof(title),
+                "SDL3 GPU MVP - %.1f FPS | VSync: %s (F1) | HDR: %s (F2)",
                 fps,
                 vsyncEnabled ? "ON" : "OFF",
-                hdrEnabled ? "ON" : "OFF");
+                hdrEnabled   ? "ON" : "OFF");
             SDL_SetWindowTitle(window, title);
-
-            // Reset counters
-            frameCount = 0;
-            fpsLastTime = currentTime;
+            frameCount  = 0;
+            fpsLastTime = now;
         }
     }
 
-    // --------------------------------------------------------------------
+    // ------------------------------------------------------------------------
     // Cleanup
-    // --------------------------------------------------------------------
+    // FIX: SDL_WaitForGPUIdle belongs HERE, not in the render loop.
+    // It ensures all in-flight GPU work is finished before releasing resources.
+    // ------------------------------------------------------------------------
     SDL_Log("Shutting down...");
+    SDL_WaitForGPUIdle(device);
 
     SDL_ReleaseGPUTransferBuffer(device, vertexTransferBuffer);
     SDL_ReleaseGPUBuffer(device, vertexBuffer);
