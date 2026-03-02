@@ -465,6 +465,13 @@ int main(int argc, char* argv[]) {
     bool running = true;
     Uint64 startTime = SDL_GetTicks();
     
+    // FPS tracking variables
+    Uint64 fpsLastTime = SDL_GetTicks();
+    Uint32 frameCount = 0;
+    
+    // VSync state
+    bool vsyncEnabled = true;
+    
     while (running) {
         // Poll events (SDL2-style)
         SDL_Event event;
@@ -477,6 +484,14 @@ int main(int argc, char* argv[]) {
                 case SDL_EVENT_KEY_DOWN:
                     if (event.key.key == SDLK_ESCAPE) {
                         running = false;
+                    }
+                    else if (event.key.key == SDLK_F1) {
+                        // Toggle VSync
+                        vsyncEnabled = !vsyncEnabled;
+                        SDL_SetGPUSwapchainParameters(device, window,
+                            vsyncEnabled ? SDL_GPU_SWAPCHAINCOMPOSITION_SDR : SDL_GPU_SWAPCHAINCOMPOSITION_SDR,
+                            vsyncEnabled ? SDL_GPU_PRESENTMODE_VSYNC : SDL_GPU_PRESENTMODE_IMMEDIATE);
+                        SDL_Log("VSync %s", vsyncEnabled ? "enabled" : "disabled");
                     }
                     break;
                 
@@ -596,6 +611,26 @@ int main(int argc, char* argv[]) {
         // Submit and Present
         // --------------------------------------------------------------------
         SDL_SubmitGPUCommandBuffer(cmdBuf);
+        
+        // --------------------------------------------------------------------
+        // FPS Counter
+        // --------------------------------------------------------------------
+        frameCount++;
+        Uint64 currentTime = SDL_GetTicks();
+        Uint64 elapsedTime = currentTime - fpsLastTime;
+        
+        // Update window title every second
+        if (elapsedTime >= 1000) {
+            float fps = static_cast<float>(frameCount) * 1000.0f / static_cast<float>(elapsedTime);
+            char title[64];
+            SDL_snprintf(title, sizeof(title), "SDL3 GPU MVP - %.1f FPS - VSync: %s (F1 to toggle)",
+                fps, vsyncEnabled ? "ON" : "OFF");
+            SDL_SetWindowTitle(window, title);
+            
+            // Reset counters
+            frameCount = 0;
+            fpsLastTime = currentTime;
+        }
     }
 
     // --------------------------------------------------------------------
