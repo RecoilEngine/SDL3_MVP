@@ -20,15 +20,6 @@ FetchContent_Declare(
 # Make SDL3 available
 FetchContent_MakeAvailable(SDL3)
 
-# Find Vulkan SDK for glslangValidator
-find_package(Vulkan QUIET)
-
-# Also try to find glslangValidator directly
-find_program(GLSLANG_VALIDATOR glslangValidator HINTS 
-    "$ENV{VULKAN_SDK}/Bin" 
-    "$ENV{VULKAN_SDK}/bin"
-)
-
 # Find DXC for HLSL compilation (Windows only)
 if(WIN32)
     find_program(DXC dxc HINTS
@@ -39,35 +30,27 @@ if(WIN32)
     )
 endif()
 
-# Shader compilation function for SPIR-V (Vulkan)
+# Shader compilation function for SPIR-V (Vulkan) using DXC
 function(compile_spirv input_file output_file shader_stage)
-    if(GLSLANG_VALIDATOR)
+    if(DXC)
         add_custom_command(
             OUTPUT ${output_file}
-            COMMAND ${GLSLANG_VALIDATOR}
-                -V ${input_file}
-                -o ${output_file}
-                --target-env vulkan1.0
+            COMMAND ${DXC}
+                -T ${shader_stage}_6_0
+                -E main
+                -spirv
+                -Fo ${output_file}
+                ${input_file}
             DEPENDS ${input_file}
-            COMMENT "Compiling ${input_file} to SPIR-V"
-        )
-    elseif(Vulkan_glslangValidator_FOUND)
-        add_custom_command(
-            OUTPUT ${output_file}
-            COMMAND ${Vulkan_GLSLANG_VALIDATOR}
-                -V ${input_file}
-                -o ${output_file}
-                --target-env vulkan1.0
-            DEPENDS ${input_file}
-            COMMENT "Compiling ${input_file} to SPIR-V"
+            COMMENT "Compiling ${input_file} to SPIR-V via DXC"
         )
     else()
         file(WRITE ${output_file} "")
-        message(WARNING "No glslangValidator found. SPIR-V shaders must be pre-compiled.")
+        message(WARNING "No DXC found. SPIR-V shaders must be pre-compiled.")
     endif()
 endfunction()
 
-# Shader compilation function for DXIL (D3D12)
+# Shader compilation function for DXIL (D3D12) using DXC
 function(compile_dxil input_file output_file shader_stage)
     if(DXC)
         add_custom_command(
@@ -78,7 +61,7 @@ function(compile_dxil input_file output_file shader_stage)
                 -Fo ${output_file}
                 ${input_file}
             DEPENDS ${input_file}
-            COMMENT "Compiling ${input_file} to DXIL"
+            COMMENT "Compiling ${input_file} to DXIL via DXC"
         )
     else()
         file(WRITE ${output_file} "")
@@ -91,14 +74,18 @@ set(SHADER_DIR ${CMAKE_SOURCE_DIR}/shaders)
 set(BUILT_SHADER_DIR ${CMAKE_BINARY_DIR}/shaders)
 file(MAKE_DIRECTORY ${BUILT_SHADER_DIR})
 
-# SPIR-V shaders for Vulkan
-compile_spirv(${SHADER_DIR}/triangle.vert ${BUILT_SHADER_DIR}/triangle.vert.spv vert)
-compile_spirv(${SHADER_DIR}/triangle.frag ${BUILT_SHADER_DIR}/triangle.frag.spv frag)
+# Use HLSL as source for both backends
+set(VERT_SOURCE ${SHADER_DIR}/triangle.vert.hlsl)
+set(FRAG_SOURCE ${SHADER_DIR}/triangle.frag.hlsl)
+
+# SPIR-V shaders for Vulkan (compiled from HLSL using DXC)
+compile_spirv(${VERT_SOURCE} ${BUILT_SHADER_DIR}/triangle.vert.spv vs)
+compile_spirv(${FRAG_SOURCE} ${BUILT_SHADER_DIR}/triangle.frag.spv ps)
 
 # DXIL shaders for D3D12 (Windows only)
 if(WIN32)
-    compile_dxil(${SHADER_DIR}/triangle.vert.hlsl ${BUILT_SHADER_DIR}/triangle.vert.dxil vs)
-    compile_dxil(${SHADER_DIR}/triangle.frag.hlsl ${BUILT_SHADER_DIR}/triangle.frag.dxil ps)
+    compile_dxil(${VERT_SOURCE} ${BUILT_SHADER_DIR}/triangle.vert.dxil vs)
+    compile_dxil(${FRAG_SOURCE} ${BUILT_SHADER_DIR}/triangle.frag.dxil ps)
 endif()
 
 add_custom_target(shaders ALL DEPENDS

@@ -1,6 +1,6 @@
 struct VSInput {
-    float2 position : POSITION;
-    float4 color : COLOR;
+    float2 position : TEXCOORD0;
+    float4 color : TEXCOORD1;
 };
 
 struct VSOutput {
