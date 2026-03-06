@@ -25,6 +25,17 @@ enum class ShaderTarget {
 };
 
 // ============================================================================
+// Shader Reflection Data
+// ============================================================================
+struct ShaderReflection {
+    uint32_t numUniformBuffers = 0;    // Constant buffers
+    uint32_t numStorageBuffers = 0;    // Storage buffers (StructuredBuffer, RWStructuredBuffer)
+    uint32_t numSamplers = 0;          // Sampler states
+    uint32_t numStorageTextures = 0;   // RWTexture (read-write textures)
+    uint32_t numSampledTextures = 0;   // Sampled textures (Texture2D, etc.)
+};
+
+// ============================================================================
 // Compiled Shader Result
 // ============================================================================
 struct CompiledShader {
@@ -32,8 +43,9 @@ struct CompiledShader {
     std::string entryPoint;
     SDL_GPUShaderFormat format;
     SDL_GPUShaderStage stage;
+    ShaderReflection reflection;  // Reflection data for resource binding
     std::string errorMessage;
-    
+
     bool isValid() const { return !code.empty() && errorMessage.empty(); }
 };
 
@@ -55,22 +67,22 @@ class SlangCompiler {
 public:
     SlangCompiler();
     ~SlangCompiler();
-    
+
     // Non-copyable, movable
     SlangCompiler(const SlangCompiler&) = delete;
     SlangCompiler& operator=(const SlangCompiler&) = delete;
     SlangCompiler(SlangCompiler&&) noexcept;
     SlangCompiler& operator=(SlangCompiler&&) noexcept;
-    
+
     // Initialize the Slang compiler. Must be called before compileShader.
     bool initialize();
-    
+
     // Shutdown and release all Slang resources.
     void shutdown();
-    
+
     // Check if the compiler is initialized and ready.
     bool isInitialized() const;
-    
+
     // Compile a shader from a file.
     // @param sourcePath Path to the .slang file
     // @param entryPoint Name of the entry point function (e.g., "vertexMain")
@@ -83,7 +95,7 @@ public:
         ShaderTarget target,
         SDL_GPUShaderStage stage
     );
-    
+
     // Compile a shader from source string.
     // Useful for hot-reload or embedded shaders.
     // @param source The Slang source code
@@ -99,23 +111,23 @@ public:
         ShaderTarget target,
         SDL_GPUShaderStage stage
     );
-    
+
     // Set compiler options
     void setOptions(const SlangCompilerOptions& options);
-    
+
     // Utility: Convert ShaderTarget to SDL_GPUShaderFormat
     static SDL_GPUShaderFormat targetToSDLFormat(ShaderTarget target);
-    
+
     // Utility: Detect best shader target from SDL GPU driver name
     static ShaderTarget detectTargetFromDriver(const char* driverName);
-    
+
     // Utility: Get file extension for a shader target
     static const char* getTargetExtension(ShaderTarget target);
 
 private:
     struct Impl;
     std::unique_ptr<Impl> m_impl;
-    
+
     // Internal compilation helper
     CompiledShader compileInternal(
         slang::IModule* module,

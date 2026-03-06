@@ -446,8 +446,10 @@ int main(int argc, char* argv[]) {
         vertShaderInfo.entrypoint         = vertCompiled.entryPoint.c_str();
         vertShaderInfo.format             = vertCompiled.format;
         vertShaderInfo.stage              = SDL_GPU_SHADERSTAGE_VERTEX;
-        vertShaderInfo.num_samplers       = 0;
-        vertShaderInfo.num_uniform_buffers = 0;
+        vertShaderInfo.num_samplers       = vertCompiled.reflection.numSamplers;
+        vertShaderInfo.num_uniform_buffers = vertCompiled.reflection.numUniformBuffers;
+        vertShaderInfo.num_storage_buffers = vertCompiled.reflection.numStorageBuffers;
+        vertShaderInfo.num_storage_textures = vertCompiled.reflection.numStorageTextures;
 
         vertexShader = SDL_CreateGPUShader(device, &vertShaderInfo);
         if (!vertexShader) {
@@ -488,8 +490,10 @@ int main(int argc, char* argv[]) {
         fragShaderInfo.entrypoint         = fragCompiled.entryPoint.c_str();
         fragShaderInfo.format             = fragCompiled.format;
         fragShaderInfo.stage              = SDL_GPU_SHADERSTAGE_FRAGMENT;
-        fragShaderInfo.num_samplers       = 1;
-        fragShaderInfo.num_uniform_buffers = 0;
+        fragShaderInfo.num_samplers       = fragCompiled.reflection.numSamplers;
+        fragShaderInfo.num_uniform_buffers = fragCompiled.reflection.numUniformBuffers;
+        fragShaderInfo.num_storage_buffers = fragCompiled.reflection.numStorageBuffers;
+        fragShaderInfo.num_storage_textures = fragCompiled.reflection.numStorageTextures;
 
         fragmentShader = SDL_CreateGPUShader(device, &fragShaderInfo);
         if (!fragmentShader) {
