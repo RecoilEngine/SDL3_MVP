@@ -222,22 +222,16 @@ int main(int argc, char* argv[]) {
     // defaulted to .spv even when SDL picked D3D12, which would fail to load
     // shaders entirely.
     // ------------------------------------------------------------------------
-    SDL_GPUShaderFormat shaderFormat;
-    const char*         shaderFormatName;
-    ShaderTarget        shaderTarget;  // For Slang compiler
+    const char* shaderFormatName;
 
     const char* detectedDriver = SDL_GetGPUDeviceDriver(device);
     SDL_Log("GPU Device Driver: %s", detectedDriver);
 
     if (strcmp(detectedDriver, "direct3d12") == 0) {
-        shaderFormat     = SDL_GPU_SHADERFORMAT_DXIL;
         shaderFormatName = "DXIL";
-        shaderTarget     = ShaderTarget::DXIL;
     } else {
         // Vulkan (or any other SPIR-V capable backend such as Metal via MoltenVK)
-        shaderFormat     = SDL_GPU_SHADERFORMAT_SPIRV;
         shaderFormatName = "SPIR-V";
-        shaderTarget     = ShaderTarget::SPIRV;
     }
     SDL_Log("Shader Format: %s", shaderFormatName);
 
