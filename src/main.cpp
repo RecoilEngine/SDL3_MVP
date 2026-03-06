@@ -10,6 +10,8 @@
 #include <string>
 #include <stdlib.h>
 
+#include "shader_module.hpp"
+
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -221,21 +223,21 @@ int main(int argc, char* argv[]) {
     // shaders entirely.
     // ------------------------------------------------------------------------
     SDL_GPUShaderFormat shaderFormat;
-    const char*         shaderExtension;
     const char*         shaderFormatName;
+    ShaderTarget        shaderTarget;  // For Slang compiler
 
     const char* detectedDriver = SDL_GetGPUDeviceDriver(device);
     SDL_Log("GPU Device Driver: %s", detectedDriver);
 
     if (strcmp(detectedDriver, "direct3d12") == 0) {
         shaderFormat     = SDL_GPU_SHADERFORMAT_DXIL;
-        shaderExtension  = ".dxil";
         shaderFormatName = "DXIL";
+        shaderTarget     = ShaderTarget::DXIL;
     } else {
         // Vulkan (or any other SPIR-V capable backend such as Metal via MoltenVK)
         shaderFormat     = SDL_GPU_SHADERFORMAT_SPIRV;
-        shaderExtension  = ".spv";
         shaderFormatName = "SPIR-V";
+        shaderTarget     = ShaderTarget::SPIRV;
     }
     SDL_Log("Shader Format: %s", shaderFormatName);
 
@@ -393,16 +395,16 @@ int main(int argc, char* argv[]) {
     }
 
     // ------------------------------------------------------------------------
-    // Load and Compile Shaders
+    // Compile Shaders with Slang (Runtime Compilation)
     // ------------------------------------------------------------------------
     SDL_GPUShader* vertexShader   = nullptr;
     SDL_GPUShader* fragmentShader = nullptr;
 
     {
-        std::string vertPath = std::string("shaders/triangle.vert") + shaderExtension;
-        std::vector<uint8_t> vertCode = loadShaderFile(vertPath.c_str());
-        if (vertCode.empty()) {
-            SDL_Log("Failed to load vertex shader: %s", vertPath.c_str());
+        // Initialize Slang compiler
+        SlangCompiler slangCompiler;
+        if (!slangCompiler.initialize()) {
+            SDL_Log("Failed to initialize Slang compiler");
             SDL_ReleaseGPUSampler(device, sampler);
             SDL_ReleaseGPUTexture(device, texture);
             SDL_ReleaseWindowFromGPUDevice(device, window);
@@ -412,11 +414,37 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
+        // Detect shader target from detected driver
+        ShaderTarget shaderTarget = SlangCompiler::detectTargetFromDriver(detectedDriver);
+        SDL_Log("Slang target: %s",
+            shaderTarget == ShaderTarget::DXIL ? "DXIL" :
+            shaderTarget == ShaderTarget::Metal ? "Metal" : "SPIR-V");
+
+        // Compile vertex shader from Slang source
+        CompiledShader vertCompiled = slangCompiler.compileShader(
+            "shaders/triangle.slang",
+            "vertexMain",
+            shaderTarget,
+            SDL_GPU_SHADERSTAGE_VERTEX
+        );
+
+        if (!vertCompiled.isValid()) {
+            SDL_Log("Failed to compile vertex shader: %s", vertCompiled.errorMessage.c_str());
+            SDL_ReleaseGPUSampler(device, sampler);
+            SDL_ReleaseGPUTexture(device, texture);
+            SDL_ReleaseWindowFromGPUDevice(device, window);
+            SDL_DestroyGPUDevice(device);
+            SDL_DestroyWindow(window);
+            SDL_Quit();
+            return 1;
+        }
+
+        // Create vertex shader from compiled code
         SDL_GPUShaderCreateInfo vertShaderInfo = {};
-        vertShaderInfo.code               = vertCode.data();
-        vertShaderInfo.code_size          = vertCode.size();
-        vertShaderInfo.entrypoint         = "main";
-        vertShaderInfo.format             = shaderFormat;
+        vertShaderInfo.code               = vertCompiled.code.data();
+        vertShaderInfo.code_size          = vertCompiled.code.size();
+        vertShaderInfo.entrypoint         = vertCompiled.entryPoint.c_str();
+        vertShaderInfo.format             = vertCompiled.format;
         vertShaderInfo.stage              = SDL_GPU_SHADERSTAGE_VERTEX;
         vertShaderInfo.num_samplers       = 0;
         vertShaderInfo.num_uniform_buffers = 0;
@@ -433,10 +461,16 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        std::string fragPath = std::string("shaders/triangle.frag") + shaderExtension;
-        std::vector<uint8_t> fragCode = loadShaderFile(fragPath.c_str());
-        if (fragCode.empty()) {
-            SDL_Log("Failed to load fragment shader: %s", fragPath.c_str());
+        // Compile fragment shader from Slang source
+        CompiledShader fragCompiled = slangCompiler.compileShader(
+            "shaders/triangle.slang",
+            "fragmentMain",
+            shaderTarget,
+            SDL_GPU_SHADERSTAGE_FRAGMENT
+        );
+
+        if (!fragCompiled.isValid()) {
+            SDL_Log("Failed to compile fragment shader: %s", fragCompiled.errorMessage.c_str());
             SDL_ReleaseGPUShader(device, vertexShader);
             SDL_ReleaseGPUSampler(device, sampler);
             SDL_ReleaseGPUTexture(device, texture);
@@ -447,11 +481,12 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
+        // Create fragment shader from compiled code
         SDL_GPUShaderCreateInfo fragShaderInfo = {};
-        fragShaderInfo.code               = fragCode.data();
-        fragShaderInfo.code_size          = fragCode.size();
-        fragShaderInfo.entrypoint         = "main";
-        fragShaderInfo.format             = shaderFormat;
+        fragShaderInfo.code               = fragCompiled.code.data();
+        fragShaderInfo.code_size          = fragCompiled.code.size();
+        fragShaderInfo.entrypoint         = fragCompiled.entryPoint.c_str();
+        fragShaderInfo.format             = fragCompiled.format;
         fragShaderInfo.stage              = SDL_GPU_SHADERSTAGE_FRAGMENT;
         fragShaderInfo.num_samplers       = 1;
         fragShaderInfo.num_uniform_buffers = 0;

@@ -9,146 +9,145 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Include FetchContent and find packages
 include(FetchContent)
 
-# Fetch SDL3
+# ============================================================================
+# SDL3
+# ============================================================================
 FetchContent_Declare(
     SDL3
     GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
     GIT_TAG release-3.4.2
     GIT_SHALLOW TRUE
 )
-
-# Make SDL3 available
 FetchContent_MakeAvailable(SDL3)
 
-# Find DXC for HLSL compilation
-find_program(DXC dxc HINTS
-    "$ENV{VULKAN_SDK}/Bin"
-    "$ENV{VULKAN_SDK}/bin"
-    "/usr/bin"
-    "/usr/local/bin"
-    "C:/Program Files (x86)/Windows Kits/10/bin/10.0.22621.0/x64"
-    "C:/Program Files (x86)/Windows Kits/10/bin/10.0.22000.0/x64"
-)
+# ============================================================================
+# Slang Shader Compiler - Download pre-built binaries
+# ============================================================================
+set(SLANG_VERSION "2026.3.1")
 
-# Shader compilation function for SPIR-V (Vulkan) using DXC
-function(compile_spirv input_file output_file shader_stage)
-    if(DXC)
-        add_custom_command(
-            OUTPUT ${output_file}
-            COMMAND ${DXC}
-                -T ${shader_stage}_6_0
-                -E main
-                -spirv
-                -Fo ${output_file}
-                ${input_file}
-            DEPENDS ${input_file}
-            COMMENT "Compiling ${input_file} to SPIR-V via DXC"
-        )
-    else()
-        file(WRITE ${output_file} "")
-        message(WARNING "No DXC found. SPIR-V shaders must be pre-compiled.")
-    endif()
-endfunction()
-
-# Shader compilation function for DXIL (D3D12) using DXC
-function(compile_dxil input_file output_file shader_stage)
-    if(DXC)
-        add_custom_command(
-            OUTPUT ${output_file}
-            COMMAND ${DXC}
-                -T ${shader_stage}_6_0
-                -E main
-                -Fo ${output_file}
-                ${input_file}
-            DEPENDS ${input_file}
-            COMMENT "Compiling ${input_file} to DXIL via DXC"
-        )
-    else()
-        file(WRITE ${output_file} "")
-        message(WARNING "No DXC found. DXIL shaders must be pre-compiled.")
-    endif()
-endfunction()
-
-# Compile shaders
-set(SHADER_DIR ${CMAKE_SOURCE_DIR}/shaders)
-set(BUILT_SHADER_DIR ${CMAKE_BINARY_DIR}/shaders)
-file(MAKE_DIRECTORY ${BUILT_SHADER_DIR})
-
-# Use HLSL as source for both backends
-set(VERT_SOURCE ${SHADER_DIR}/triangle.vert.hlsl)
-set(FRAG_SOURCE ${SHADER_DIR}/triangle.frag.hlsl)
-
-# SPIR-V shaders for Vulkan (compiled from HLSL using DXC)
-compile_spirv(${VERT_SOURCE} ${BUILT_SHADER_DIR}/triangle.vert.spv vs)
-compile_spirv(${FRAG_SOURCE} ${BUILT_SHADER_DIR}/triangle.frag.spv ps)
-
-# DXIL shaders for D3D12 (Windows only)
 if(WIN32)
-    compile_dxil(${VERT_SOURCE} ${BUILT_SHADER_DIR}/triangle.vert.dxil vs)
-    compile_dxil(${FRAG_SOURCE} ${BUILT_SHADER_DIR}/triangle.frag.dxil ps)
+    set(SLANG_PLATFORM "windows-x64")
+    set(SLANG_ARCHIVE_EXT "zip")
+elseif(APPLE)
+    set(SLANG_PLATFORM "macos-x64")
+    set(SLANG_ARCHIVE_EXT "zip")
+else()
+    set(SLANG_PLATFORM "linux-x86_64")
+    set(SLANG_ARCHIVE_EXT "tar.gz")
 endif()
 
-add_custom_target(shaders ALL DEPENDS
-    ${BUILT_SHADER_DIR}/triangle.vert.spv
-    ${BUILT_SHADER_DIR}/triangle.frag.spv
-)
+set(SLANG_ARCHIVE_NAME "slang-${SLANG_VERSION}-${SLANG_PLATFORM}.${SLANG_ARCHIVE_EXT}")
+set(SLANG_DOWNLOAD_URL "https://github.com/shader-slang/slang/releases/download/v${SLANG_VERSION}/${SLANG_ARCHIVE_NAME}")
 
-# Create executable
-add_executable(${PROJECT_NAME}
-    src/main.cpp
+FetchContent_Declare(
+    slang
+    URL ${SLANG_DOWNLOAD_URL}
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
+FetchContent_MakeAvailable(slang)
 
-# Define shaders_dxil target for DXIL shaders
-if(WIN32 AND DXC)
-    add_custom_target(shaders_dxil ALL DEPENDS
-        ${BUILT_SHADER_DIR}/triangle.vert.dxil
-        ${BUILT_SHADER_DIR}/triangle.frag.dxil
+# Set up Slang paths from fetched content
+set(SLANG_ROOT "${slang_SOURCE_DIR}")
+set(SLANG_INCLUDE_DIR "${SLANG_ROOT}/include")
+set(SLANG_LIB_DIR "${SLANG_ROOT}/lib")
+set(SLANG_BIN_DIR "${SLANG_ROOT}/bin")
+
+message(STATUS "Slang SDK found at: ${SLANG_ROOT}")
+message(STATUS "Slang include: ${SLANG_INCLUDE_DIR}")
+message(STATUS "Slang lib: ${SLANG_LIB_DIR}")
+
+# Create imported target for Slang
+add_library(slang::slang SHARED IMPORTED GLOBAL)
+
+if(WIN32)
+    set_target_properties(slang::slang PROPERTIES
+        IMPORTED_LOCATION "${SLANG_BIN_DIR}/slang.dll"
+        IMPORTED_IMPLIB "${SLANG_LIB_DIR}/slang.lib"
+        INTERFACE_INCLUDE_DIRECTORIES "${SLANG_INCLUDE_DIR}"
+    )
+elseif(APPLE)
+    set_target_properties(slang::slang PROPERTIES
+        IMPORTED_LOCATION "${SLANG_LIB_DIR}/libslang.dylib"
+        INTERFACE_INCLUDE_DIRECTORIES "${SLANG_INCLUDE_DIR}"
+    )
+else()
+    set_target_properties(slang::slang PROPERTIES
+        IMPORTED_LOCATION "${SLANG_LIB_DIR}/libslang.so"
+        INTERFACE_INCLUDE_DIRECTORIES "${SLANG_INCLUDE_DIR}"
     )
 endif()
 
-add_dependencies(${PROJECT_NAME} shaders)
+# ============================================================================
+# Executable
+# ============================================================================
+add_executable(${PROJECT_NAME}
+    src/main.cpp
+    src/shader_module.cpp
+)
 
-# Add DXIL shader dependencies on Windows
-if(WIN32 AND DXC)
-    add_dependencies(${PROJECT_NAME} shaders_dxil)
-endif()
+target_include_directories(${PROJECT_NAME} PRIVATE 
+    ${CMAKE_SOURCE_DIR}/src
+)
 
-# Link SDL3
-target_link_libraries(${PROJECT_NAME} PRIVATE SDL3::SDL3)
+# Link libraries
+target_link_libraries(${PROJECT_NAME} PRIVATE 
+    SDL3::SDL3
+    slang::slang
+)
 
+# ============================================================================
 # Platform-specific settings
+# ============================================================================
 if(WIN32)
-    # Windows-specific settings
     set_property(TARGET ${PROJECT_NAME} PROPERTY WIN32_EXECUTABLE FALSE)
     
-    # Copy SDL3 DLL to output directory on Windows
+    # Copy SDL3 DLL to output directory
     add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "$<TARGET_FILE:SDL3::SDL3>"
         "$<TARGET_FILE_DIR:${PROJECT_NAME}>"
     )
+    
+    # Copy Slang DLL to output directory
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${SLANG_BIN_DIR}/slang.dll"
+        "$<TARGET_FILE_DIR:${PROJECT_NAME}>"
+    )
 elseif(APPLE)
-    # macOS-specific settings
     set_property(TARGET ${PROJECT_NAME} PROPERTY
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/Info.plist.in"
     )
+else()
+    # Copy Slang shared library to output directory on Linux
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${SLANG_LIB_DIR}/libslang.so"
+        "$<TARGET_FILE_DIR:${PROJECT_NAME}>"
+    )
 endif()
 
-# Enable all warnings
+# ============================================================================
+# Compiler warnings
+# ============================================================================
 if(MSVC)
     target_compile_options(${PROJECT_NAME} PRIVATE /W4 /WX-)
 else()
     target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
-# Set output directories
+# ============================================================================
+# Output directories
+# ============================================================================
 set_target_properties(${PROJECT_NAME} PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
     ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
 )
 
-# Copy assets to build directory
+# ============================================================================
+# Copy assets and shaders to build directory
+# ============================================================================
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
     "${CMAKE_SOURCE_DIR}/assets"
@@ -156,18 +155,20 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMENT "Copying assets to build directory"
 )
 
-# Copy compiled shaders to build directory
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-    "${BUILT_SHADER_DIR}"
-    "$<TARGET_FILE_DIR:${PROJECT_NAME}>/shaders"
-    COMMENT "Copying shaders to build directory"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    "${CMAKE_SOURCE_DIR}/shaders/triangle.slang"
+    "$<TARGET_FILE_DIR:${PROJECT_NAME}>/shaders/triangle.slang"
+    COMMENT "Copying Slang shaders to build directory"
 )
 
+# ============================================================================
 # Install targets
+# ============================================================================
 install(TARGETS ${PROJECT_NAME}
     RUNTIME DESTINATION bin
     BUNDLE DESTINATION .
 )
 
 install(DIRECTORY assets DESTINATION .)
+install(DIRECTORY shaders DESTINATION . FILES_MATCHING PATTERN "*.slang")
