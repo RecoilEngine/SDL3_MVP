@@ -18,8 +18,8 @@
 // Texture and sampler bindings for SDL3
 // SDL3 expects fragment samplers in space2 (Vulkan set 2)
 // Using separate texture and sampler to match SDL3's expected layout
-[[vk::binding(0, 2)]] Texture2D texture0 : register(t0, space2);
-[[vk::binding(0, 2)]] SamplerState sampler0 : register(s0, space2);
+[[vk::binding(0, 2)]] Texture2D texture0;
+[[vk::binding(0, 2)]] SamplerState sampler0;
 
 // ============================================================================
 // Vertex Shader
